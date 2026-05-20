@@ -6,9 +6,9 @@ The proxy reads channels from an M3U/M3U8 playlist, advertises a virtual tuner o
 
 ## Demo
 
-[![Windows Media Center demo on Vista](assets/demo/windows-vista-wmc-demo.jpg)](assets/demo/windows-vista-wmc-demo.mp4)
+[![Windows Media Center demo on Vista](assets/demo/windows-vista-wmc-demo.jpg)](https://jns630.github.io/HDHRProxyWMC-IPTV-Vista-7/)
 
-[Watch the demo video](assets/demo/windows-vista-wmc-demo.mp4)
+[Open the HTML5 demo player](https://jns630.github.io/HDHRProxyWMC-IPTV-Vista-7/) or [watch the MP4 directly](assets/demo/windows-vista-wmc-demo.mp4).
 
 ## What It Does
 

@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HDHRProxyWMC-IPTV Demo</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: "Segoe UI", Arial, sans-serif;
+      background: #111317;
+      color: #f4f6f8;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background:
+        linear-gradient(180deg, rgba(17, 19, 23, 0.92), rgba(17, 19, 23, 0.98)),
+        url("https://raw.githubusercontent.com/jns630/HDHRProxyWMC-IPTV-Vista-7/main/assets/demo/windows-vista-wmc-demo.jpg") center / cover;
+    }
+
+    main {
+      width: min(1100px, calc(100vw - 32px));
+      padding: 32px 0;
+    }
+
+    h1 {
+      margin: 0 0 16px;
+      font-size: clamp(28px, 5vw, 52px);
+      font-weight: 700;
+    }
+
+    p {
+      margin: 0 0 24px;
+      max-width: 720px;
+      color: #c8d0d8;
+      font-size: 18px;
+      line-height: 1.5;
+    }
+
+    video {
+      display: block;
+      width: 100%;
+      aspect-ratio: 1920 / 1012;
+      background: #050608;
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      box-shadow: 0 24px 80px rgba(0, 0, 0, 0.48);
+    }
+
+    a {
+      color: #8fc7ff;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Windows Media Center Demo</h1>
+    <p>HDHRProxyWMC-IPTV running with Windows Media Center on Vista.</p>
+    <video controls preload="metadata" poster="https://raw.githubusercontent.com/jns630/HDHRProxyWMC-IPTV-Vista-7/main/assets/demo/windows-vista-wmc-demo.jpg">
+      <source src="https://raw.githubusercontent.com/jns630/HDHRProxyWMC-IPTV-Vista-7/main/assets/demo/windows-vista-wmc-demo.mp4" type="video/mp4">
+      <a href="https://github.com/jns630/HDHRProxyWMC-IPTV-Vista-7/raw/main/assets/demo/windows-vista-wmc-demo.mp4">Watch the demo video</a>
+    </video>
+  </main>
+</body>
+</html>
