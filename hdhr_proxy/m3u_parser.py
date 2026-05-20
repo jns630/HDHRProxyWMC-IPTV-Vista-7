@@ -7,6 +7,11 @@ from typing import List, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+US_BCAST_FIRST_PHYSICAL_CHANNEL = 2
+US_BCAST_LAST_PHYSICAL_CHANNEL = 69
+VIRTUAL_PROGRAMS_PER_PHYSICAL_CHANNEL = 6
+VIRTUAL_FIRST_PROGRAM_NUMBER = 3
+
 
 class M3UChannel:
     def __init__(self):
@@ -264,7 +269,7 @@ def build_lineup(
         frequency = _us_bcast_frequency_for_physical_channel(physical_channel)
         low_freq = frequency - 3000000
         high_freq = frequency + 3000000
-        program_number = 3
+        program_number = _program_number_for_index(i)
         pmt_pid = 0x30 + i
         video_pid = 0x40 + i
         audio_pid = 0x50 + i
@@ -301,7 +306,14 @@ def build_lineup(
 
 
 def _physical_channel_for_index(index: int) -> int:
-    return min(max(index + 1, 2), 69)
+    physical_count = US_BCAST_LAST_PHYSICAL_CHANNEL - US_BCAST_FIRST_PHYSICAL_CHANNEL + 1
+    slot = (max(index, 1) - 1) // VIRTUAL_PROGRAMS_PER_PHYSICAL_CHANNEL
+    return US_BCAST_FIRST_PHYSICAL_CHANNEL + (slot % physical_count)
+
+
+def _program_number_for_index(index: int) -> int:
+    slot = (max(index, 1) - 1) % VIRTUAL_PROGRAMS_PER_PHYSICAL_CHANNEL
+    return VIRTUAL_FIRST_PROGRAM_NUMBER + slot
 
 
 def _us_bcast_frequency_for_physical_channel(physical: int) -> int:

@@ -563,7 +563,7 @@ class DiscoveryServer:
                 return f"ch=auto:{rf['frequency']} lock=8vsb ss={rf['ss']} snq={rf['snq']} seq={rf['seq']} bps={rf['bps']} pps={rf['bps'] // 188}"
             return "ch=none lock=none ss=0 snq=0 seq=0 bps=0 pps=0"
         if "/streaminfo" in name:
-            return self._format_streaminfo(self._rf_channels[0]) if self._rf_channels else "none"
+            return self._format_streaminfo_for_physical(self._rf_channels[0]) if self._rf_channels else "none"
         if "/channelmap" in name:
             return "us-bcast"
         if "/channel" in name:
@@ -677,12 +677,13 @@ class DiscoveryServer:
                 self._refresh_tuner_status(tuner_idx)
             elif field == "program":
                 state["program"] = value or "none"
-                if not state.get("channel_id"):
+                channel_id, rf = self._select_program_for_current_tune(state, value)
+                if channel_id is None:
                     channel_id, rf = self._select_channel_for_tune(value)
                     if channel_id is None:
                         channel_id, rf = self._virtual_rf_for_current_tune(value)
-                    state["channel_id"] = channel_id
-                    state["rf"] = rf
+                state["channel_id"] = channel_id
+                state["rf"] = rf
                 self._refresh_tuner_status(tuner_idx)
             elif field == "target":
                 if value and value != "none" and not state.get("channel_id") and self._looks_like_atsc_scan_probe(state.get("channel", ""), [int(n) for n in re.findall(r"\d+", state.get("channel", ""))]):
@@ -778,6 +779,24 @@ class DiscoveryServer:
 
         return None, None
 
+    def _select_program_for_current_tune(self, state: Dict, value: str) -> Tuple[Optional[str], Optional[Dict]]:
+        current_rf = state.get("rf")
+        if not current_rf:
+            return None, None
+        try:
+            program = int(value)
+        except (TypeError, ValueError):
+            return None, None
+        if program <= 0:
+            return current_rf["channel_id"], current_rf
+        for rf in self._rf_channels:
+            if (
+                int(rf.get("physical") or 0) == int(current_rf.get("physical") or 0)
+                and int(rf.get("program") or 0) == program
+            ):
+                return rf["channel_id"], rf
+        return current_rf["channel_id"], current_rf
+
     def _virtual_rf_for_current_tune(self, hint: str) -> Tuple[Optional[str], Optional[Dict]]:
         if not self._rf_channels:
             return None, None
@@ -821,7 +840,7 @@ class DiscoveryServer:
                 f"ch={channel} lock=8vsb ss={rf['ss']} snq={rf['snq']} "
                 f"seq={rf['seq']} bps={rf['bps']} pps={rf['bps'] // 188}"
             )
-            state["streaminfo"] = self._format_streaminfo(rf)
+            state["streaminfo"] = self._format_streaminfo_for_physical(rf)
         else:
             state["status"] = f"ch={channel} lock=none ss=0 snq=0 seq=0 bps=0 pps=0"
             state["streaminfo"] = "none"
@@ -857,6 +876,13 @@ class DiscoveryServer:
             f"tsid=0x{tsid:04X}\n"
             f"pmt=0x{pmt_pid:04X} v=0x{video_pid:04X} a=0x{audio_pid:04X}\n"
         )
+
+    def _format_streaminfo_for_physical(self, rf: Dict) -> str:
+        physical = int(rf.get("physical") or 0)
+        matches = [item for item in self._rf_channels if int(item.get("physical") or 0) == physical]
+        if not matches:
+            return self._format_streaminfo(rf)
+        return "".join(self._format_streaminfo(item) for item in matches)
 
     def _format_lineup_scan(self) -> str:
         if self._lineup_scan_active:
