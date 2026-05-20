@@ -13,7 +13,10 @@ import time
 import zlib
 import queue
 import urllib.parse
+import urllib.request
 from typing import Callable, Dict, List, Optional, Tuple
+
+from .m3u_parser import M3UParser
 
 logger = logging.getLogger(__name__)
 CONTROL_TRACE_PATH = os.path.abspath("hdhr_control_trace.log")
@@ -254,6 +257,7 @@ class DiscoveryServer:
         self._lineup_scan_active = False
         self._lineup_scan_map = "us-bcast"
         self._lineup_scan_started_at = 0.0
+        self._hls_variant_cache: Dict[str, Tuple[str, float]] = {}
         self._state_lock = threading.Lock()
         self._rf_channels = self._build_rf_channel_map()
         self._tuner_state = {
@@ -1004,6 +1008,7 @@ class DiscoveryServer:
         if not source_url:
             logger.warning("Channel %s has no source URL", channel_id)
             return
+        source_url = self._resolve_hls_source_url(source_url)
 
         missing_variants = getattr(channel, "ext", {}).get("hls_missing_variants") if channel else None
         if missing_variants:
@@ -1056,6 +1061,44 @@ class DiscoveryServer:
         else:
             self._start_psip_sender_locked(state, stream_target)
         logger.info("Streaming channel %s to HDHR target %s (ffmpeg log: %s)", channel_id, target, log_path)
+
+    def _resolve_hls_source_url(self, source_url: str) -> str:
+        parsed = urllib.parse.urlparse(source_url or "")
+        if parsed.scheme.lower() not in ("http", "https"):
+            return source_url
+        if not parsed.path.lower().endswith((".m3u8", ".m3u")):
+            return source_url
+
+        now = time.monotonic()
+        cached = self._hls_variant_cache.get(source_url)
+        if cached and cached[1] > now:
+            return cached[0]
+
+        try:
+            req = urllib.request.Request(
+                source_url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122 Safari/537.36",
+                    "Accept": "application/vnd.apple.mpegurl,application/x-mpegURL,*/*",
+                    "Origin": "https://pluto.tv",
+                    "Referer": "https://pluto.tv/",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                raw = resp.read(512 * 1024).decode("utf-8", errors="replace")
+        except Exception as exc:
+            logger.debug("Unable to inspect HLS source %s: %s", source_url, exc)
+            return source_url
+
+        variants = M3UParser._hls_variant_uris(raw)
+        selected = M3UParser._select_hls_variant(variants)
+        if not selected:
+            return source_url
+
+        playback_url = urllib.parse.urljoin(source_url, selected)
+        self._hls_variant_cache[source_url] = (playback_url, now + 300)
+        logger.info("Using HLS media variant for playback: %s", playback_url)
+        return playback_url
 
     def _rf_stream_key(self, rf: Dict) -> Tuple[int, int]:
         return int(rf.get("physical") or 0), int(rf.get("program") or 0)
@@ -1536,6 +1579,7 @@ class DiscoveryServer:
                 "-reconnect_delay_max", "2",
                 "-reconnect_on_network_error", "1",
                 "-user_agent", "VLC/3.0.20 LibVLC/3.0.20",
+                "-headers", "Accept: application/vnd.apple.mpegurl,application/x-mpegURL,*/*\r\nOrigin: https://pluto.tv\r\nReferer: https://pluto.tv/\r\n",
             ])
         elif self._looks_like_local_hls(source_url):
             input_args.extend([
