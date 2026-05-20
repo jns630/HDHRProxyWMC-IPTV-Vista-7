@@ -1341,7 +1341,7 @@ class DiscoveryServer:
         channels = b"".join(self._make_tvct_channel(rf) for rf in rf_group)
         body = (
             int(first.get("physical") or 1).to_bytes(2, "big")
-            + bytes([0xC1, 0x00, 0x00, len(rf_group) & 0xFF])
+            + bytes([0xC1, 0x00, 0x00, 0x00, len(rf_group) & 0xFF])
             + channels
             + (0xF000).to_bytes(2, "big")  # additional_descriptors_length=0
         )
