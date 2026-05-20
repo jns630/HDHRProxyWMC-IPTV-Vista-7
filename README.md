@@ -26,7 +26,7 @@ The proxy reads channels from an M3U/M3U8 playlist, advertises a virtual tuner o
 - Parses local or remote M3U/M3U8 playlists.
 - Resolves relative playlist URLs for both local files and remote playlists.
 - Detects HLS master playlists and chooses a playable variant when possible.
-- Transcodes source streams through ffmpeg to MPEG-TS with MPEG-2 video and AC-3 audio by default.
+- Transcodes source streams through ffmpeg to WMC-friendly MPEG-TS, using MPEG-2 video on Vista and H.264/MPEG-4 AVC on Windows 7 or newer.
 - Generates a WMC/HDHRProxyIPTV-style mapping list at startup.
 - Writes Windows registry defaults that help Windows Media Center identify the virtual tuner as a digital antenna source.
 
@@ -189,7 +189,7 @@ python main.py --config config.json --tuners 4
 | `xmltv_url` | Reserved for XMLTV data. | `null` |
 | `ffmpeg_path` | Path or command name for ffmpeg. | `ffmpeg` |
 | `ffmpeg_enabled` | Enables ffmpeg transcoding. | `true` |
-| `ffmpeg_output_codec` | Video codec used by HTTP stream transcoding. | `mpeg2video` |
+| `ffmpeg_output_codec` | Configured video codec. At runtime, WMC mode forces Vista to `mpeg2video` and Windows 7 or newer to `libx264` H.264/MPEG-4 AVC. | `mpeg2video` |
 | `ffmpeg_audio_codec` | Audio codec used by HTTP stream transcoding. | `ac3` |
 | `ffmpeg_bitrate` | Video bitrate passed to ffmpeg. | `4000k` |
 | `udp_bind_ip` | Reserved for UDP stream handling. | `0.0.0.0` |
@@ -318,7 +318,8 @@ This project is tuned for Windows Media Center-style discovery and playback:
 - It reports a digital antenna source.
 - It creates ATSC-style channel metadata and broadcast frequencies.
 - It can write registry values for SiliconDust tuner source defaults.
-- It uses MPEG-2 video, AC-3 audio, and MPEG-TS output by default.
+- It keeps Vista on MPEG-2 video for compatibility, and switches Windows 7 or newer to H.264/MPEG-4 AVC video for WMC playback.
+- It uses AC-3 stereo audio and MPEG-TS output for WMC streams.
 - It includes helper PowerShell scripts for WMC and registry setup.
 
 When the proxy starts on Windows, it tries to write HDHomeRun tuner defaults under:
@@ -338,9 +339,10 @@ Import that file from an elevated prompt or by using Registry Editor as Administ
 
 ## ffmpeg Behavior
 
-ffmpeg is used to turn a wide range of IPTV/HLS sources into a WMC-friendly MPEG-TS stream. The default HTTP streaming command targets:
+ffmpeg is used to turn a wide range of IPTV/HLS sources into a WMC-friendly MPEG-TS stream. The proxy applies an OS-aware video codec policy at startup:
 
-- MPEG-2 video
+- Windows Vista / Windows version `6.0`: MPEG-2 video (`mpeg2video`)
+- Windows 7 or newer / Windows version `6.1+`: H.264/MPEG-4 AVC video (`libx264`)
 - AC-3 stereo audio
 - 1280x720 output
 - 29.97 fps
@@ -348,7 +350,7 @@ ffmpeg is used to turn a wide range of IPTV/HLS sources into a WMC-friendly MPEG
 - Repeated headers/PAT/PMT data
 - Network reconnection flags for remote streams
 
-For the HDHomeRun control path, the proxy can also start ffmpeg-backed UDP output when a client sets tuner target variables.
+For the HDHomeRun control path, the proxy also labels the MPEG-TS program map correctly for the selected video codec: MPEG-2 streams use PMT stream type `0x02`, while H.264/MPEG-4 AVC streams use `0x1B`.
 
 If ffmpeg is not found, set `ffmpeg_path` in `config.json` to the full executable path.
 
