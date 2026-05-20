@@ -6,7 +6,9 @@ The proxy reads channels from an M3U/M3U8 playlist, advertises a virtual tuner o
 
 ## Demo
 
-<video src="assets/demo/windows-vista-wmc-demo.mp4" controls width="100%"></video>
+[![Windows Media Center demo on Vista](assets/demo/windows-vista-wmc-demo.jpg)](assets/demo/windows-vista-wmc-demo.mp4)
+
+[Watch the demo video](assets/demo/windows-vista-wmc-demo.mp4)
 
 ## What It Does
 
