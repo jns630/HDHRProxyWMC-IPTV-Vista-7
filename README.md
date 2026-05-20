@@ -317,6 +317,7 @@ This project is tuned for Windows Media Center-style discovery and playback:
 - It advertises itself as a SiliconDust tuner.
 - It reports a digital antenna source.
 - It creates ATSC-style channel metadata and broadcast frequencies.
+- It packs large M3U playlists into scanned RF subchannels, supporting up to 1024 generated channels.
 - It can write registry values for SiliconDust tuner source defaults.
 - It keeps Vista on MPEG-2 video for compatibility, and switches Windows 7 or newer to H.264/MPEG-4 AVC video for WMC playback.
 - It uses AC-3 stereo audio and MPEG-TS output for WMC streams.

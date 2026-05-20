@@ -9,8 +9,9 @@ logger = logging.getLogger(__name__)
 
 US_BCAST_FIRST_PHYSICAL_CHANNEL = 2
 US_BCAST_LAST_PHYSICAL_CHANNEL = 69
-VIRTUAL_PROGRAMS_PER_PHYSICAL_CHANNEL = 6
+VIRTUAL_PROGRAMS_PER_PHYSICAL_CHANNEL = 16
 VIRTUAL_FIRST_PROGRAM_NUMBER = 3
+MPEGTS_DYNAMIC_PID_BASE = 0x30
 
 
 class M3UChannel:
@@ -271,9 +272,10 @@ def build_lineup(
         frequency = _us_bcast_frequency_for_physical_channel(physical_channel)
         low_freq = frequency - 3000000
         high_freq = frequency + 3000000
-        pmt_pid = 0x30 + i
-        video_pid = 0x40 + i
-        audio_pid = 0x50 + i
+        pid_base = MPEGTS_DYNAMIC_PID_BASE + ((i - 1) * 3)
+        pmt_pid = pid_base
+        video_pid = pid_base + 1
+        audio_pid = pid_base + 2
         safe_name = _safe_program_name(ch.name)
         program_pids = f"0,16,17,{pmt_pid},{video_pid},{audio_pid}"
         program_table = (
