@@ -4,6 +4,10 @@ Virtual HDHomeRun Proxy presents an IPTV or HLS playlist as a SiliconDust-style 
 
 The proxy reads channels from an M3U/M3U8 playlist, advertises a virtual tuner on the local network, serves HDHomeRun discovery and lineup metadata, and uses ffmpeg to transcode streams into an MPEG-TS shape that Windows Media Center can tune more reliably.
 
+## Demo
+
+<video src="assets/demo/windows-vista-wmc-demo.mp4" controls width="100%"></video>
+
 ## What It Does
 
 - Emulates an HDHomeRun tuner device with configurable device ID, model, firmware version, and tuner count.
