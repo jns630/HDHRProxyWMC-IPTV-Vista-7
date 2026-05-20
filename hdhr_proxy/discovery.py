@@ -1046,7 +1046,7 @@ class DiscoveryServer:
 
         state["target"] = target
         state["target_norm"] = ffmpeg_target
-        state["stream_rf_key"] = rf_key
+        state["stream_rf_key"] = self._rf_stream_key(state.get("rf") or {})
         state["process"] = proc
         state["log_file"] = log_file
         state["stream_stop"] = stream_stop
@@ -1074,16 +1074,27 @@ class DiscoveryServer:
 
         current_rf = state.get("rf") or {}
         current_physical = int(current_rf.get("physical") or 0)
-        matches = [
+        av_matches = [
             rf for rf in self._rf_channels
             if int(rf.get("video_pid") or 0) in requested
             or int(rf.get("audio_pid") or 0) in requested
         ]
+        pmt_matches = [
+            rf for rf in self._rf_channels
+            if int(rf.get("pmt_pid") or 0) in requested
+        ]
         if current_physical:
-            for rf in matches:
+            for rf in av_matches:
                 if int(rf.get("physical") or 0) == current_physical:
                     return rf.get("channel_id"), rf
-        return (matches[0].get("channel_id"), matches[0]) if len(matches) == 1 else (None, None)
+            for rf in pmt_matches:
+                if int(rf.get("physical") or 0) == current_physical:
+                    return rf.get("channel_id"), rf
+        if len(av_matches) == 1:
+            return av_matches[0].get("channel_id"), av_matches[0]
+        if len(pmt_matches) == 1:
+            return pmt_matches[0].get("channel_id"), pmt_matches[0]
+        return None, None
 
     def _requested_filter_pids(self, filter_value: object) -> set:
         text = str(filter_value or "").lower()
