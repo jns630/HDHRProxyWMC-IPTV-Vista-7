@@ -667,6 +667,8 @@ class DiscoveryServer:
                 value = "us-bcast"
             state[field] = value or "none"
             if field == "channel":
+                previous_rf = state.get("rf") or {}
+                previous_physical = int(previous_rf.get("physical") or 0)
                 channel_id, rf = self._select_channel_for_tune(value)
                 if channel_id is None:
                     channel_id, rf = self._virtual_rf_for_current_tune(value)
@@ -674,6 +676,9 @@ class DiscoveryServer:
                 state["rf"] = rf
                 state["filter"] = "0x0000-0x1FFF"
                 state["program"] = "none"
+                current_physical = int((rf or {}).get("physical") or 0)
+                if current_physical and previous_physical and current_physical != previous_physical:
+                    self._stop_tuner_process_locked(state)
                 self._refresh_tuner_status(tuner_idx)
             elif field == "program":
                 state["program"] = value or "none"
@@ -956,13 +961,15 @@ class DiscoveryServer:
             state["target_norm"] = "none"
             return
 
-        ffmpeg_target = self._normalize_stream_target(target)
+        stream_target = self._normalize_stream_target(target)
+        ffmpeg_target = self._ffmpeg_stream_target(stream_target) if stream_target else None
         if not ffmpeg_target:
             logger.warning("Unsupported HDHR target %s", target)
             return
 
         proc = state.get("process")
-        if state.get("target_norm") == ffmpeg_target and proc and proc.poll() is None:
+        rf_key = self._rf_stream_key(state.get("rf") or {})
+        if state.get("target_norm") == ffmpeg_target and state.get("stream_rf_key") == rf_key and proc and proc.poll() is None:
             # WMC repeats target/filter/status commands while it waits for data. Do not
             # restart ffmpeg on each repeat or WMC will only ever see stream startup.
             self._refresh_tuner_status(tuner_idx)
@@ -1010,7 +1017,7 @@ class DiscoveryServer:
                 return
             log_path = os.path.abspath(f"ffmpeg_tuner{tuner_idx}.log")
             log_file = open(log_path, "ab", buffering=0)
-            log_file.write((f"\n\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} target={ffmpeg_target} source={source_url} ===\n").encode("utf-8"))
+            log_file.write((f"\n\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} target={stream_target} ffmpeg_target={ffmpeg_target} source={source_url} ===\n").encode("utf-8"))
             log_file.write((f"Python UDP bridge: {udp_addr[0]}:{udp_addr[1]} @ {self._transport_bps()} bps\n").encode("utf-8"))
             log_file.write((" ".join(cmd) + "\n").encode("utf-8", errors="replace"))
             proc = subprocess.Popen(
@@ -1026,7 +1033,7 @@ class DiscoveryServer:
         stream_stop = threading.Event()
         stream_thread = threading.Thread(
             target=self._udp_bridge_from_ffmpeg,
-            args=(proc, udp_addr, self._transport_bps(), stream_stop, log_file, tuner_idx),
+            args=(proc, udp_addr, self._transport_bps(), stream_target.lower().startswith("rtp://"), stream_stop, log_file, tuner_idx),
             daemon=True,
             name=f"hdhr-stream-{tuner_idx}",
         )
@@ -1034,6 +1041,7 @@ class DiscoveryServer:
 
         state["target"] = target
         state["target_norm"] = ffmpeg_target
+        state["stream_rf_key"] = rf_key
         state["process"] = proc
         state["log_file"] = log_file
         state["stream_stop"] = stream_stop
@@ -1041,8 +1049,11 @@ class DiscoveryServer:
         if self._filter_requests_playback_pids(state):
             self._stop_psip_sender_locked(state)
         else:
-            self._start_psip_sender_locked(state, ffmpeg_target)
+            self._start_psip_sender_locked(state, stream_target)
         logger.info("Streaming channel %s to HDHR target %s (ffmpeg log: %s)", channel_id, target, log_path)
+
+    def _rf_stream_key(self, rf: Dict) -> Tuple[int, int]:
+        return int(rf.get("physical") or 0), int(rf.get("program") or 0)
 
     def _filter_requests_playback_pids(self, state: Dict) -> bool:
         rf = state.get("rf") or {}
@@ -1093,6 +1104,7 @@ class DiscoveryServer:
         proc: subprocess.Popen,
         addr: Tuple[str, int],
         transport_bps: int,
+        use_rtp: bool,
         stop_event: threading.Event,
         log_file,
         tuner_idx: int,
@@ -1158,6 +1170,9 @@ class DiscoveryServer:
                 prebuffered.append(burst)
 
             next_send = time.perf_counter()
+            rtp_sequence = 0
+            rtp_timestamp = int(time.time() * 90000) & 0xFFFFFFFF
+            rtp_ssrc = (0x48444852 << 16 | tuner_idx) & 0xFFFFFFFF
             while not stop_event.is_set():
                 if prebuffered:
                     burst = prebuffered.pop(0)
@@ -1182,9 +1197,14 @@ class DiscoveryServer:
                     if not chunk:
                         continue
                     try:
-                        sock.sendto(chunk, addr)
-                        bytes_sent += len(chunk)
+                        datagram = self._wrap_rtp_mpegts(chunk, rtp_sequence, rtp_timestamp, rtp_ssrc) if use_rtp else chunk
+                        sock.sendto(datagram, addr)
+                        bytes_sent += len(datagram)
                         burst_sent += len(chunk)
+                        if use_rtp:
+                            rtp_sequence = (rtp_sequence + 1) & 0xFFFF
+                            ticks = max(1, int((len(chunk) * 8 * 90000) / max(transport_bps, 1)))
+                            rtp_timestamp = (rtp_timestamp + ticks) & 0xFFFFFFFF
                     except OSError as exc:
                         if not _is_ignorable_udp_error(exc):
                             logger.warning("UDP bridge send failed for tuner%s to %s:%s: %s", tuner_idx, addr[0], addr[1], exc)
@@ -1213,18 +1233,23 @@ class DiscoveryServer:
 
     def _normalize_stream_target(self, target: str) -> Optional[str]:
         value = (target or "").strip()
-        if value.startswith("udp://"):
+        if value.startswith(("udp://", "rtp://")):
             return value
-        if value.startswith("rtp://"):
-            # Some Windows Media Center / HDHomeRun BDA stacks request rtp:// but
-            # expect the tuner filter to receive raw MPEG-TS datagrams.
-            return "udp://" + value[len("rtp://"):]
         match = re.match(r"^(?:udp|rtp)\s+([0-9.]+):(\d+)$", value, re.IGNORECASE)
         if match:
-            return f"udp://{match.group(1)}:{match.group(2)}"
+            scheme = value.split(None, 1)[0].lower()
+            return f"{scheme}://{match.group(1)}:{match.group(2)}"
         match = re.match(r"^([0-9.]+):(\d+)$", value)
         if match:
             return f"udp://{match.group(1)}:{match.group(2)}"
+        return None
+
+    def _ffmpeg_stream_target(self, target: str) -> Optional[str]:
+        value = (target or "").strip()
+        if value.startswith("udp://"):
+            return value
+        if value.startswith("rtp://"):
+            return "udp://" + value[len("rtp://"):]
         return None
 
     def _start_psip_sender_locked(self, state: Dict, target: str):
@@ -1256,7 +1281,7 @@ class DiscoveryServer:
             return
         psip_packets = self._build_atsc_psip_packets(rf)
         null_packet = bytes([0x47, 0x1F, 0xFF, 0x10]) + (b"\xFF" * 184)
-        ts_datagram = b"".join(psip_packets + [null_packet] * 3)
+        ts_packets = psip_packets + [null_packet] * 8
         is_rtp = target.lower().startswith("rtp://")
         addr = (match.group(1), int(match.group(2)))
         sequence = 0
@@ -1265,11 +1290,13 @@ class DiscoveryServer:
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
                 while not stop_event.is_set():
-                    datagram = self._wrap_rtp_mpegts(ts_datagram, sequence, timestamp, ssrc) if is_rtp else ts_datagram
-                    sock.sendto(datagram, addr)
-                    sequence = (sequence + 1) & 0xFFFF
-                    timestamp = (timestamp + 9000) & 0xFFFFFFFF
-                    time.sleep(0.2)
+                    for offset in range(0, len(ts_packets), 7):
+                        payload = b"".join(ts_packets[offset:offset + 7])
+                        datagram = self._wrap_rtp_mpegts(payload, sequence, timestamp, ssrc) if is_rtp else payload
+                        sock.sendto(datagram, addr)
+                        sequence = (sequence + 1) & 0xFFFF
+                        timestamp = (timestamp + 1500) & 0xFFFFFFFF
+                    time.sleep(0.1)
         except OSError as e:
             logger.debug(f"ATSC PSIP sender failed for {target}: {e}")
 
