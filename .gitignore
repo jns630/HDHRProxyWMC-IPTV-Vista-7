@@ -17,3 +17,5 @@ wmc_ehome_backup_*/
 # Bundled local ffmpeg builds are large; install ffmpeg separately or set ffmpeg_path.
 ffmpeg/
 
+# PyInstaller temporary build cache
+build/
