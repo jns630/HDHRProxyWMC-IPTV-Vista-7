@@ -1285,8 +1285,9 @@ class DiscoveryServer:
         pcr_pid = int(rf.get("video_pid") or 0x41)
         video_pid = int(rf.get("video_pid") or 0x41)
         audio_pid = int(rf.get("audio_pid") or 0x51)
+        video_stream_type = self._mpegts_video_stream_type()
         streams = (
-            bytes([0x02]) + (0xE000 | video_pid).to_bytes(2, "big") + (0xF000).to_bytes(2, "big")
+            bytes([video_stream_type]) + (0xE000 | video_pid).to_bytes(2, "big") + (0xF000).to_bytes(2, "big")
             + bytes([0x81]) + (0xE000 | audio_pid).to_bytes(2, "big") + (0xF000).to_bytes(2, "big")
         )
         body = (
@@ -1297,6 +1298,12 @@ class DiscoveryServer:
             + streams
         )
         return self._make_psi_section(0x02, body)
+
+    def _mpegts_video_stream_type(self) -> int:
+        codec = (self.output_codec or "").lower()
+        if codec in ("h264", "libx264", "mpeg4_h264", "mpeg4-avc", "avc"):
+            return 0x1B
+        return 0x02
 
     def _make_tvct_section(self, rf: Dict) -> bytes:
         name = self._safe_channel_name(rf.get("name", "VirtualHD"))[:7]
@@ -1429,16 +1436,7 @@ class DiscoveryServer:
             "-map", "0:a:0?",
             "-dn",
             "-sn",
-            "-c:v", "mpeg2video",
-            "-pix_fmt", "yuv420p",
-            "-profile:v", "main",
-            "-level:v", "high",
-            "-r", "30000/1001",
-            "-s", "1280x720",
-            "-aspect", "16:9",
-            "-b:v", self.bitrate,
-            "-g", "15",
-            "-bf", "0",
+        ] + self._video_encoder_args() + [
             "-c:a", "ac3",
             "-b:a", "192k",
             "-ar", "48000",
@@ -1458,6 +1456,31 @@ class DiscoveryServer:
             "-pat_period", "0.10",
             "pipe:1",
         ]
+
+    def _video_encoder_args(self) -> List[str]:
+        codec = (self.output_codec or "mpeg2video").lower()
+        common = [
+            "-pix_fmt", "yuv420p",
+            "-r", "30000/1001",
+            "-s", "1280x720",
+            "-aspect", "16:9",
+            "-b:v", self.bitrate,
+            "-g", "15",
+            "-bf", "0",
+        ]
+        if codec in ("h264", "libx264", "mpeg4_h264", "mpeg4-avc", "avc"):
+            return [
+                "-c:v", "libx264",
+                "-preset", "veryfast",
+                "-tune", "zerolatency",
+                "-profile:v", "high",
+                "-level:v", "4.0",
+            ] + common
+        return [
+            "-c:v", "mpeg2video",
+            "-profile:v", "main",
+            "-level:v", "high",
+        ] + common
 
     def _is_network_media_source(self, source_url: str) -> bool:
         return urllib.parse.urlparse(source_url or "").scheme.lower() in ("http", "https")

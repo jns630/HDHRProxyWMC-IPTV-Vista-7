@@ -18,6 +18,34 @@ FFMPEG_INPUT_OPTIONS = [
 ]
 
 
+def video_encoder_args(output_codec: str, bitrate: str):
+    codec = (output_codec or "mpeg2video").lower()
+    common = [
+        "-b:v", bitrate,
+        "-maxrate:v", bitrate,
+        "-bufsize:v", str(int(bitrate.rstrip("k")) * 2) + "k",
+        "-g", "15",
+        "-bf", "0",
+        "-pix_fmt", "yuv420p",
+        "-r", "30000/1001",
+        "-s", "1280x720",
+        "-aspect", "16:9",
+    ]
+    if codec in ("h264", "libx264", "mpeg4_h264", "mpeg4-avc", "avc"):
+        return [
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-tune", "zerolatency",
+            "-profile:v", "high",
+            "-level:v", "4.0",
+        ] + common
+    return [
+        "-c:v", "mpeg2video",
+        "-profile:v", "main",
+        "-level:v", "main",
+    ] + common
+
+
 def ffmpeg_available(ffmpeg_path: str = "ffmpeg") -> bool:
     try:
         subprocess.run(
@@ -83,18 +111,7 @@ def ffmpeg_transcode_stream(
         "-map", "0:a:0?",
         "-dn",
         "-sn",
-        "-c:v", output_codec,
-        "-b:v", bitrate,
-        "-maxrate:v", bitrate,
-        "-bufsize:v", str(int(bitrate.rstrip("k")) * 2) + "k",
-        "-g", "15",
-        "-bf", "0",
-        "-pix_fmt", "yuv420p",
-        "-profile:v", "main",
-        "-level:v", "main",
-        "-r", "30000/1001",
-        "-s", "1280x720",
-        "-aspect", "16:9",
+    ] + video_encoder_args(output_codec, bitrate) + [
         "-c:a", audio_codec,
         "-b:a", "192k",
         "-ar", "48000",

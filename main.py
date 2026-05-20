@@ -34,6 +34,27 @@ logging.basicConfig(
 logger = logging.getLogger("main")
 
 
+def wmc_video_codec_for_current_os() -> str:
+    if platform.system() != "Windows":
+        return "mpeg2video"
+
+    version = sys.getwindowsversion()
+    if (version.major, version.minor) <= (6, 0):
+        return "mpeg2video"
+    return "libx264"
+
+
+def apply_wmc_video_codec_policy(cfg: Config):
+    codec = wmc_video_codec_for_current_os()
+    if cfg.ffmpeg_output_codec != codec:
+        logger.info(
+            "Using %s video for Windows Media Center on this OS (was configured as %s).",
+            "H.264/MPEG-4 AVC" if codec == "libx264" else "MPEG-2",
+            cfg.ffmpeg_output_codec,
+        )
+    cfg.ffmpeg_output_codec = codec
+
+
 def configure_windows_hdhr_sources(cfg: Config):
     if platform.system() != "Windows":
         return
@@ -195,6 +216,8 @@ def resolve_listen_ip(cfg: Config) -> str:
 
 
 def run_proxy(cfg: Config):
+    apply_wmc_video_codec_policy(cfg)
+
     normalized_device_id = normalize_device_id(cfg.device_id)
     if normalized_device_id != cfg.device_id.upper():
         logger.warning(
