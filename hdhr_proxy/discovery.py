@@ -698,12 +698,6 @@ class DiscoveryServer:
             elif field == "filter":
                 if not value or value == "bypass":
                     state["filter"] = "0x0000-0x1FFF"
-                channel_id, rf = self._select_channel_for_filter_pids(state)
-                if channel_id and rf and channel_id != state.get("channel_id"):
-                    state["channel_id"] = channel_id
-                    state["rf"] = rf
-                    if state.get("target") not in (None, "none"):
-                        self._stop_tuner_process_locked(state)
                 if self._filter_requests_playback_pids(state):
                     self._stop_psip_sender_locked(state)
                 self._refresh_tuner_status(tuner_idx)
@@ -983,16 +977,11 @@ class DiscoveryServer:
 
         self._stop_tuner_process_locked(state)
 
-        pid_channel_id, pid_rf = self._select_channel_for_filter_pids(state)
-        if pid_channel_id and pid_rf:
-            channel_id = pid_channel_id
-            state["rf"] = pid_rf
-        else:
-            channel_id = state.get("channel_id")
+        channel_id = state.get("channel_id") or self._select_channel_id(state.get("program", ""))
         if channel_id not in self.channel_map:
-            logger.warning("No mapped channel for tuned target %s (channel=%s filter=%s)", target, state.get("channel"), state.get("filter"))
-            self._refresh_tuner_status(tuner_idx)
-            return
+            # WMC often sets target while tuned to a scan RF that is not the actual IPTV channel.
+            # Keep the current tuned channel text, but stream the real mapped channel.
+            channel_id = self._select_channel_id("")
         state["channel_id"] = channel_id
         if channel_id in self.channel_map:
             for rf in self._rf_channels:
@@ -1070,36 +1059,9 @@ class DiscoveryServer:
         rf = state.get("rf") or {}
         video_pid = int(rf.get("video_pid") or 0x41)
         audio_pid = int(rf.get("audio_pid") or 0x51)
-        requested = self._requested_filter_pids(state.get("filter"))
+        filter_value = str(state.get("filter") or "").lower()
+        requested = {int(match, 16) for match in re.findall(r"0x([0-9a-f]+)", filter_value)}
         return video_pid in requested or audio_pid in requested
-
-    def _select_channel_for_filter_pids(self, state: Dict) -> Tuple[Optional[str], Optional[Dict]]:
-        requested = self._requested_filter_pids(state.get("filter"))
-        if not requested:
-            return None, None
-        current_rf = state.get("rf") or {}
-        current_physical = int(current_rf.get("physical") or 0)
-        matches = [
-            rf for rf in self._rf_channels
-            if int(rf.get("video_pid") or 0) in requested
-            or int(rf.get("audio_pid") or 0) in requested
-        ]
-        if current_physical:
-            for rf in matches:
-                if int(rf.get("physical") or 0) == current_physical:
-                    return rf.get("channel_id"), rf
-        return (matches[0].get("channel_id"), matches[0]) if len(matches) == 1 else (None, None)
-
-    def _requested_filter_pids(self, filter_value: object) -> set:
-        text = str(filter_value or "").lower()
-        requested = {int(match, 16) for match in re.findall(r"0x([0-9a-f]+)(?!\s*-)", text)}
-        for start, end in re.findall(r"0x([0-9a-f]+)\s*-\s*0x([0-9a-f]+)", text):
-            first = int(start, 16)
-            last = int(end, 16)
-            if first > last:
-                first, last = last, first
-            requested.update(range(first, min(last, 0x1FFF) + 1))
-        return requested
 
     def _stop_tuner_process_locked(self, state: Dict):
         psip_stop = state.get("psip_stop")
