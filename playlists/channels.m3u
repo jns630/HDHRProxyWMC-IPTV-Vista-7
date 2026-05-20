@@ -1,0 +1,11 @@
+#EXTM3U
+#EXTINF:-1 tvg-id="1" tvg-chno="1.1" tvg-name="Channel One" group-title="News",Channel One
+http://example.com/stream/ch1.ts
+#EXTINF:-1 tvg-id="2" tvg-chno="2.1" tvg-name="Channel Two" group-title="Entertainment",Channel Two
+http://example.com/stream/ch2.ts
+#EXTINF:-1 tvg-id="3" tvg-chno="3.1" tvg-name="Channel Three" group-title="Sports",Channel Three
+http://example.com/stream/ch3.ts
+#EXTINF:-1 tvg-id="4" tvg-chno="4.1" tvg-name="Movie Channel" group-title="Movies",Movie Channel
+http://example.com/stream/ch4.ts
+#EXTINF:-1 tvg-id="5" tvg-chno="5.1" tvg-name="Kids TV" group-title="Kids",Kids TV
+http://example.com/stream/ch5.ts

@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Runtime logs and generated scan/output files
+*.log
+HDHRProxyIPTV_MappingList.generated.ini
+hdhr_wmc_*.reg
+*_backup.reg
+wmc_tuners_backup.reg
+hdhr_scan_*.txt
+
+# Local media/test captures and backups
+_screen_samples/
+wmc_ehome_backup_*/
+
+# Bundled local ffmpeg builds are large; install ffmpeg separately or set ffmpeg_path.
+ffmpeg/
+

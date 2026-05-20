@@ -1,0 +1,9 @@
+# Runtime dependencies: none.
+#
+# Vista/WMC compatibility target:
+# - Use Python 3.6.x, the last practical Python 3 line for Windows Vista-era systems.
+# - Keep ffmpeg.exe beside the proxy or set "ffmpeg_path" in config.json.
+#
+# Optional only if you want Windows Service support on a machine/newer Python that
+# has a compatible pywin32 wheel available:
+# pywin32
