@@ -1283,27 +1283,32 @@ class DiscoveryServer:
         return header + payload
 
     def _build_atsc_psip_packets(self, rf: Dict) -> List[bytes]:
-        pat_section = self._make_pat_section(rf)
-        pmt_section = self._make_pmt_section(rf)
-        tvct_section = self._make_tvct_section(rf)
+        rf_group = self._rf_group_for_physical(rf)
+        pat_section = self._make_pat_section(rf_group)
+        tvct_section = self._make_tvct_section(rf_group)
         mgt_section = self._make_mgt_section(len(tvct_section))
-        return (
-            self._packetize_psi_section(0x0000, pat_section, 0)
-            + self._packetize_psi_section(int(rf.get("pmt_pid") or 0x31), pmt_section, 0)
-            + self._packetize_psi_section(0x1FFB, mgt_section, 0)
-            + self._packetize_psi_section(0x1FFB, tvct_section, 1)
-        )
+        packets = self._packetize_psi_section(0x0000, pat_section, 0)
+        for item in rf_group:
+            pmt_section = self._make_pmt_section(item)
+            packets.extend(self._packetize_psi_section(int(item.get("pmt_pid") or 0x31), pmt_section, 0))
+        packets.extend(self._packetize_psi_section(0x1FFB, mgt_section, 0))
+        packets.extend(self._packetize_psi_section(0x1FFB, tvct_section, 1))
+        return packets
 
-    def _make_pat_section(self, rf: Dict) -> bytes:
-        tsid = int(rf.get("physical") or 1)
-        program = int(rf.get("program") or ATSC_PROGRAM_NUMBER)
-        pmt_pid = int(rf.get("pmt_pid") or 0x31)
-        body = (
-            tsid.to_bytes(2, "big")
-            + bytes([0xC1, 0x00, 0x00])
-            + program.to_bytes(2, "big")
-            + (0xE000 | (pmt_pid & 0x1FFF)).to_bytes(2, "big")
-        )
+    def _rf_group_for_physical(self, rf: Dict) -> List[Dict]:
+        physical = int(rf.get("physical") or 0)
+        matches = [item for item in self._rf_channels if int(item.get("physical") or 0) == physical]
+        return matches or [rf]
+
+    def _make_pat_section(self, rf_group: List[Dict]) -> bytes:
+        first = rf_group[0] if rf_group else {}
+        tsid = int(first.get("physical") or 1)
+        programs = []
+        for rf in rf_group:
+            program = int(rf.get("program") or ATSC_PROGRAM_NUMBER)
+            pmt_pid = int(rf.get("pmt_pid") or 0x31)
+            programs.append(program.to_bytes(2, "big") + (0xE000 | (pmt_pid & 0x1FFF)).to_bytes(2, "big"))
+        body = tsid.to_bytes(2, "big") + bytes([0xC1, 0x00, 0x00]) + b"".join(programs)
         return self._make_psi_section(0x00, body)
 
     def _make_pmt_section(self, rf: Dict) -> bytes:
@@ -1331,7 +1336,18 @@ class DiscoveryServer:
             return 0x1B
         return 0x02
 
-    def _make_tvct_section(self, rf: Dict) -> bytes:
+    def _make_tvct_section(self, rf_group: List[Dict]) -> bytes:
+        first = rf_group[0] if rf_group else {}
+        channels = b"".join(self._make_tvct_channel(rf) for rf in rf_group)
+        body = (
+            int(first.get("physical") or 1).to_bytes(2, "big")
+            + bytes([0xC1, 0x00, 0x00, len(rf_group) & 0xFF])
+            + channels
+            + (0xF000).to_bytes(2, "big")  # additional_descriptors_length=0
+        )
+        return self._make_psip_section(0xC8, body)
+
+    def _make_tvct_channel(self, rf: Dict) -> bytes:
         name = self._safe_channel_name(rf.get("name", "VirtualHD"))[:7]
         short_name = name.encode("utf-16-be")[:14].ljust(14, b"\x00")
         major = int(rf.get("major") or rf.get("physical") or 2) & 0x3FF
@@ -1347,7 +1363,7 @@ class DiscoveryServer:
             | (0x7 << 6) # reserved
             | 0x02       # ATSC digital television
         )
-        channel = (
+        return (
             short_name
             + channel_numbers.to_bytes(3, "big")
             + bytes([0x04])  # ATSC 8-VSB
@@ -1358,13 +1374,6 @@ class DiscoveryServer:
             + int(major * 100 + minor).to_bytes(2, "big")
             + (0xFC00).to_bytes(2, "big")  # reserved + descriptors_length=0
         )
-        body = (
-            int(rf.get("physical") or 1).to_bytes(2, "big")
-            + bytes([0xC1, 0x00, 0x00, 0x00, 0x01])
-            + channel
-            + (0xF000).to_bytes(2, "big")  # additional_descriptors_length=0
-        )
-        return self._make_psip_section(0xC8, body)
 
     def _make_mgt_section(self, tvct_bytes: int) -> bytes:
         table_entry = (
