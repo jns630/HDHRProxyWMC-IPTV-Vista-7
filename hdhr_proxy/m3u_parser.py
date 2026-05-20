@@ -264,12 +264,13 @@ def build_lineup(
     mapping = channel_mapping or {}
 
     for i, ch in enumerate(channels, start=1):
-        guide_number = ch.tvg_chno or mapping.get(ch.name, "") or f"{i + 1}.1"
         physical_channel = _physical_channel_for_index(i)
+        program_number = _program_number_for_index(i)
+        virtual_minor = _virtual_minor_for_index(i)
+        guide_number = ch.tvg_chno or mapping.get(ch.name, "") or f"{physical_channel}.{virtual_minor}"
         frequency = _us_bcast_frequency_for_physical_channel(physical_channel)
         low_freq = frequency - 3000000
         high_freq = frequency + 3000000
-        program_number = _program_number_for_index(i)
         pmt_pid = 0x30 + i
         video_pid = 0x40 + i
         audio_pid = 0x50 + i
@@ -314,6 +315,10 @@ def _physical_channel_for_index(index: int) -> int:
 def _program_number_for_index(index: int) -> int:
     slot = (max(index, 1) - 1) % VIRTUAL_PROGRAMS_PER_PHYSICAL_CHANNEL
     return VIRTUAL_FIRST_PROGRAM_NUMBER + slot
+
+
+def _virtual_minor_for_index(index: int) -> int:
+    return ((max(index, 1) - 1) % VIRTUAL_PROGRAMS_PER_PHYSICAL_CHANNEL) + 1
 
 
 def _us_bcast_frequency_for_physical_channel(physical: int) -> int:
