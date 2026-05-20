@@ -1064,7 +1064,7 @@ class DiscoveryServer:
         rf = state.get("rf") or {}
         video_pid = int(rf.get("video_pid") or 0x41)
         audio_pid = int(rf.get("audio_pid") or 0x51)
-        requested = self._requested_filter_pids(state.get("filter"))
+        requested = self._literal_filter_pids(state.get("filter"))
         return video_pid in requested or audio_pid in requested
 
     def _select_channel_for_filter_pids(self, state: Dict) -> Tuple[Optional[str], Optional[Dict]]:
@@ -1087,7 +1087,7 @@ class DiscoveryServer:
 
     def _requested_filter_pids(self, filter_value: object) -> set:
         text = str(filter_value or "").lower()
-        requested = {int(match, 16) for match in re.findall(r"0x([0-9a-f]+)(?!\s*-)", text)}
+        requested = self._literal_filter_pids(text)
         for start, end in re.findall(r"0x([0-9a-f]+)\s*-\s*0x([0-9a-f]+)", text):
             first = int(start, 16)
             last = int(end, 16)
@@ -1095,6 +1095,13 @@ class DiscoveryServer:
                 first, last = last, first
             requested.update(range(first, min(last, 0x1FFF) + 1))
         return requested
+
+    def _literal_filter_pids(self, filter_value: object) -> set:
+        text = str(filter_value or "").lower()
+        return {
+            int(match.group(1), 16)
+            for match in re.finditer(r"(?<!-)\b0x([0-9a-f]+)\b(?!\s*-)", text)
+        }
 
     def _stop_tuner_process_locked(self, state: Dict):
         psip_stop = state.get("psip_stop")
