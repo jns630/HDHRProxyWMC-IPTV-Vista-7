@@ -30,6 +30,44 @@ The proxy reads channels from an M3U/M3U8 playlist, advertises a virtual tuner o
 - Generates a WMC/HDHRProxyIPTV-style mapping list at startup.
 - Writes Windows registry defaults that help Windows Media Center identify the virtual tuner as a digital antenna source.
 
+## How It Works
+
+At a high level, the proxy turns an IPTV playlist into something that looks and behaves like a SiliconDust HDHomeRun tuner:
+
+1. It loads channels from a local M3U file or a remote M3U URL.
+2. It builds a virtual broadcast lineup with guide numbers, physical channels, program numbers, and MPEG-TS PID assignments.
+3. It advertises that lineup over HDHomeRun discovery endpoints and sockets so Windows Media Center and other clients can find it.
+4. When a client tunes a channel, the proxy picks the right source URL, optionally resolves HLS master playlists to a playable media variant, and starts ffmpeg.
+5. ffmpeg repackages the source into a WMC-friendly MPEG-TS stream with stable PAT/PMT headers, AC-3 audio, and the correct video codec for the host OS.
+6. While WMC is still deciding which virtual subchannel it wants, the proxy can hold tuner lock and send ATSC PSIP metadata so Media Center keeps the tune alive long enough to finish selection.
+
+The result is that ordinary IPTV sources can behave much more like a real ATSC tuner from WMC's point of view.
+
+## WMC Tune Flow
+
+Windows Media Center does not always tune in one clean step. The proxy is built around that behavior:
+
+- WMC often starts by tuning a scan-style physical frequency such as `auto6t:743000000`.
+- It may then request a large basket of PMT PIDs covering many virtual subchannels on that RF.
+- The proxy does not immediately start the first channel it sees, because that can launch the wrong service and produce black screen or the wrong station.
+- Instead, it keeps tuner lock, sends PSIP tables, and waits for a more specific filter update.
+- Once WMC asks for the actual A/V PIDs, the proxy locks to the intended virtual program and starts playback for that exact subchannel.
+
+This behavior is especially important for large generated lineups where many channels share one virtual RF group.
+
+## Recent Playback Behavior
+
+The current build includes a few practical WMC-focused fixes:
+
+- Vista uses MPEG-2 video for WMC compatibility.
+- Windows 7 and newer use H.264 / MPEG-4 AVC for WMC playback.
+- HLS master playlists are resolved to a concrete media playlist before ffmpeg starts.
+- PMT and A/V PID requests are used to choose the correct virtual channel during WMC playback.
+- Broad PMT-only filter requests are deferred until WMC provides enough information to identify the intended program.
+- During that deferred window, the proxy keeps lock and emits PSIP instead of dropping to `no signal`.
+
+These fixes were added specifically to prevent wrong-channel playback, black screens, and premature `No TV Signal` failures during WMC tuning.
+
 ## Project Layout
 
 ```text
@@ -352,6 +390,8 @@ ffmpeg is used to turn a wide range of IPTV/HLS sources into a WMC-friendly MPEG
 - Network reconnection flags for remote streams
 
 For the HDHomeRun control path, the proxy also labels the MPEG-TS program map correctly for the selected video codec: MPEG-2 streams use PMT stream type `0x02`, while H.264/MPEG-4 AVC streams use `0x1B`.
+
+For remote HLS playback, the proxy also tries to open the playlist first and, when it detects a master playlist, selects a playable media variant before handing the URL to ffmpeg. This avoids a common WMC black-screen case where ffmpeg opens the master but never reaches a usable stream quickly enough.
 
 If ffmpeg is not found, set `ffmpeg_path` in `config.json` to the full executable path.
 
