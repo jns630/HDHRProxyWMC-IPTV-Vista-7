@@ -988,8 +988,6 @@ class DiscoveryServer:
             channel_id = pid_channel_id
             state["rf"] = pid_rf
         else:
-            channel_id = state.get("channel_id") or self._select_channel_id(state.get("program", ""))
-        if channel_id not in self.channel_map:
             if self._filter_requires_specific_program(state):
                 state["target"] = target
                 state["target_norm"] = ffmpeg_target
@@ -1000,6 +998,8 @@ class DiscoveryServer:
                     target,
                 )
                 return
+            channel_id = state.get("channel_id") or self._select_channel_id(state.get("program", ""))
+        if channel_id not in self.channel_map:
             # WMC often sets target while tuned to a scan RF that is not the actual IPTV channel.
             # Keep the current tuned channel text, but stream the real mapped channel.
             channel_id = self._select_channel_id("")
