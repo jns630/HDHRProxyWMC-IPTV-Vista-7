@@ -217,8 +217,11 @@ class M3UParser:
     def _stable_remote_hls_url(source: str, playback_url: str) -> str:
         if not playback_url:
             return source
-        source_host = urllib.parse.urlparse(source).netloc.lower()
+        source_parts = urllib.parse.urlparse(source)
+        source_host = source_parts.netloc.lower()
         playback_parts = urllib.parse.urlparse(playback_url)
+        if "pluto.tv" in source_host and source_parts.path.lower().endswith("/master.m3u8"):
+            return playback_url
         if len(playback_url) > HLS_REDIRECTED_URL_MAX_LENGTH:
             return source
         if "jmp2.uk" in source_host and playback_parts.query:

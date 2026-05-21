@@ -62,8 +62,11 @@ def _resolve_hls_source_url(source_url: str) -> str:
 def _should_keep_original_hls_url(source_url: str, playback_url: str) -> bool:
     if not playback_url:
         return True
-    source_host = urllib.parse.urlparse(source_url or "").netloc.lower()
+    source_parts = urllib.parse.urlparse(source_url or "")
+    source_host = source_parts.netloc.lower()
     playback_parts = urllib.parse.urlparse(playback_url)
+    if "pluto.tv" in source_host and source_parts.path.lower().endswith("/master.m3u8"):
+        return False
     if len(playback_url) > 1024:
         return True
     if "jmp2.uk" in source_host and playback_parts.query:

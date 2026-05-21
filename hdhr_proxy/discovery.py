@@ -1757,8 +1757,11 @@ class DiscoveryServer:
     def _should_keep_original_hls_url(self, source_url: str, playback_url: str) -> bool:
         if not playback_url:
             return True
-        source_host = urllib.parse.urlparse(source_url or "").netloc.lower()
+        source_parts = urllib.parse.urlparse(source_url or "")
+        source_host = source_parts.netloc.lower()
         playback_parts = urllib.parse.urlparse(playback_url)
+        if "pluto.tv" in source_host and source_parts.path.lower().endswith("/master.m3u8"):
+            return False
         if len(playback_url) > 1024:
             logger.info("Keeping original HLS URL because resolved variant is too long")
             return True
