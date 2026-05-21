@@ -989,6 +989,12 @@ class DiscoveryServer:
             state["rf"] = pid_rf
         else:
             if self._filter_requires_specific_program(state):
+                inferred_rf = self._representative_rf_for_filter(state)
+                if inferred_rf:
+                    state["channel_id"] = inferred_rf.get("channel_id")
+                    state["rf"] = inferred_rf
+                    self._refresh_tuner_status(tuner_idx)
+                    self._start_psip_sender_locked(state, stream_target)
                 state["target"] = target
                 state["target_norm"] = ffmpeg_target
                 state["stream_rf_key"] = self._rf_stream_key(state.get("rf") or {})
@@ -1147,6 +1153,35 @@ class DiscoveryServer:
         # it has committed to one program. Starting the first channel here hijacks
         # playback; wait for a later filter update with a specific program instead.
         return not av_matches and len(pmt_matches) > 1
+
+    def _representative_rf_for_filter(self, state: Dict) -> Optional[Dict]:
+        av_matches, pmt_matches, requested_count = self._filter_match_candidates(state)
+        if requested_count == 0:
+            return None
+
+        candidates = av_matches or pmt_matches
+        if not candidates:
+            return None
+
+        current_rf = state.get("rf") or {}
+        current_physical = int(current_rf.get("physical") or 0)
+        if current_physical:
+            for rf in candidates:
+                if int(rf.get("physical") or 0) == current_physical:
+                    return rf
+
+        grouped: Dict[int, List[Dict]] = {}
+        for rf in candidates:
+            physical = int(rf.get("physical") or 0)
+            grouped.setdefault(physical, []).append(rf)
+
+        if not grouped:
+            return candidates[0]
+
+        best_physical = max(grouped, key=lambda physical: (len(grouped[physical]), -physical))
+        best_group = grouped[best_physical]
+        best_group.sort(key=lambda rf: int(rf.get("program") or 0))
+        return best_group[0]
 
     def _select_channel_for_filter_pids(self, state: Dict) -> Tuple[Optional[str], Optional[Dict]]:
         av_matches, pmt_matches, requested_count = self._filter_match_candidates(state)
