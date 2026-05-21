@@ -289,10 +289,7 @@ def build_lineup(
         frequency = _us_bcast_frequency_for_physical_channel(physical_channel)
         low_freq = frequency - 3000000
         high_freq = frequency + 3000000
-        pid_base = MPEGTS_DYNAMIC_PID_BASE + ((i - 1) * 3)
-        pmt_pid = pid_base
-        video_pid = pid_base + 1
-        audio_pid = pid_base + 2
+        pmt_pid, video_pid, audio_pid = _mpegts_pids_for_program(program_number)
         safe_name = _safe_program_name(ch.name)
         program_pids = f"0,16,17,{pmt_pid},{video_pid},{audio_pid}"
         program_table = (
@@ -353,6 +350,14 @@ def _us_bcast_frequency_for_physical_channel(physical: int) -> int:
     if 14 <= physical <= 69:
         return (473 + (physical - 14) * 6) * 1000000
     return 57000000
+
+
+def _mpegts_pids_for_program(program_number: int) -> Tuple[int, int, int]:
+    # PID assignment must stay inside MPEG-TS limits regardless of total lineup size.
+    # Reuse the same PMT/video/audio slots for each virtual program position on each RF.
+    slot = max(0, int(program_number) - VIRTUAL_FIRST_PROGRAM_NUMBER)
+    pid_base = MPEGTS_DYNAMIC_PID_BASE + (slot * 3)
+    return pid_base, pid_base + 1, pid_base + 2
 
 
 def _safe_program_name(name: str) -> str:

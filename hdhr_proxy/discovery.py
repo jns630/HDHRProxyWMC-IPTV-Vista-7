@@ -743,6 +743,28 @@ class DiscoveryServer:
                 major, minor = guide.split(".", 1)
             else:
                 major, minor = str(physical_channel), "1"
+            program_number = int(item.get("ProgramNumber") or ATSC_PROGRAM_NUMBER)
+            original_pmt_pid = int(item.get("PMTPID") or 0x31)
+            original_video_pid = int(item.get("VideoPID") or 0x41)
+            original_audio_pid = int(item.get("AudioPID") or 0x51)
+            pmt_pid, video_pid, audio_pid = self._sanitize_rf_pids(
+                original_pmt_pid,
+                original_video_pid,
+                original_audio_pid,
+                program_number,
+            )
+            program_pids = f"0,16,17,{pmt_pid},{video_pid},{audio_pid}"
+            program_table = item.get("ProgramTable") or ""
+            if not program_table or (
+                original_pmt_pid != pmt_pid
+                or original_video_pid != video_pid
+                or original_audio_pid != audio_pid
+            ):
+                safe_name = self._safe_channel_name(item.get("GuideName") or getattr(channel, "name", f"CH{major}-{minor}"))
+                program_table = (
+                    f"[{program_number}:{pmt_pid}:{safe_name}:{program_pids}]"
+                    f"[tsid=0x{physical_channel:04x}]"
+                )
             channels.append({
                 "channel_id": guide_number,
                 "physical": physical_channel,
@@ -752,12 +774,12 @@ class DiscoveryServer:
                 "major": major,
                 "minor": minor,
                 "name": self._safe_channel_name(item.get("GuideName") or getattr(channel, "name", f"CH{major}-{minor}")),
-                "program": int(item.get("ProgramNumber") or ATSC_PROGRAM_NUMBER),
-                "pmt_pid": int(item.get("PMTPID") or 0x31),
-                "video_pid": int(item.get("VideoPID") or 0x41),
-                "audio_pid": int(item.get("AudioPID") or 0x51),
-                "program_pids": item.get("ProgramPIDs") or "0,16,17,48,64,80",
-                "program_table": item.get("ProgramTable") or "",
+                "program": program_number,
+                "pmt_pid": pmt_pid,
+                "video_pid": video_pid,
+                "audio_pid": audio_pid,
+                "program_pids": program_pids,
+                "program_table": program_table,
                 "ss": int(item.get("SignalStrength") or 95),
                 "snq": int(item.get("SignalQuality") or 95),
                 "seq": int(item.get("SymbolQuality") or 100),
@@ -766,6 +788,21 @@ class DiscoveryServer:
                 "bps": self._transport_bps(),
             })
         return channels
+
+    def _sanitize_rf_pids(self, pmt_pid: int, video_pid: int, audio_pid: int, program_number: int) -> Tuple[int, int, int]:
+        if all(32 <= pid <= 0x1FFF for pid in (pmt_pid, video_pid, audio_pid)):
+            return pmt_pid, video_pid, audio_pid
+        slot = max(0, int(program_number or ATSC_PROGRAM_NUMBER) - ATSC_PROGRAM_NUMBER)
+        pid_base = 0x30 + (slot * 3)
+        logger.warning(
+            "Normalizing out-of-range RF PIDs for program %s: pmt=%s video=%s audio=%s -> base=%s",
+            program_number,
+            pmt_pid,
+            video_pid,
+            audio_pid,
+            pid_base,
+        )
+        return pid_base, pid_base + 1, pid_base + 2
 
     def _select_channel_for_tune(self, hint: str) -> Tuple[Optional[str], Optional[Dict]]:
         if not self._rf_channels:
