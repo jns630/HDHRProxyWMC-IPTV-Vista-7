@@ -14,11 +14,13 @@ logger = logging.getLogger(__name__)
 
 STREAM_READ_CHUNK = 131072  # 128KB
 FFMPEG_READ_TIMEOUT = 5.0
+FFMPEG_ANALYZE_US = "5000000"
+FFMPEG_PROBE_BYTES = "5000000"
 FFMPEG_INPUT_OPTIONS = [
     "-fflags", "+genpts+discardcorrupt",
     "-flags", "low_delay",
-    "-analyzeduration", "3000000",
-    "-probesize", "3000000",
+    "-analyzeduration", FFMPEG_ANALYZE_US,
+    "-probesize", FFMPEG_PROBE_BYTES,
     "-rw_timeout", "15000000",
 ]
 
@@ -102,6 +104,15 @@ def _should_keep_original_hls_url(source_url: str, playback_url: str) -> bool:
 def video_encoder_args(output_codec: str, bitrate: str, use_hls_profile: bool = False, vista_mode: bool = False):
     codec = (output_codec or "mpeg2video").lower()
     frame_size = "720x480" if vista_mode else "1280x720"
+    bitrate_text = str(bitrate or "").strip().lower()
+    match = re.match(r"^(\d+)([km]?)$", bitrate_text)
+    if match:
+        amount = int(match.group(1))
+        suffix = match.group(2) or "k"
+        bitrate_bps = amount * (1000000 if suffix == "m" else 1000)
+    else:
+        bitrate_bps = 4000000
+    video_bufsize = f"{max(bitrate_bps // 500, 1000)}k"
     base_args = [
         "-pix_fmt", "yuv420p",
         "-r", "30000/1001",
@@ -113,11 +124,12 @@ def video_encoder_args(output_codec: str, bitrate: str, use_hls_profile: bool = 
             "-c:v", "libx264",
             "-preset", "veryfast",
             "-tune", "zerolatency",
+            "-x264-params", "nal-hrd=cbr:force-cfr=1",
             "-profile:v", "high",
             "-level:v", "4.0",
             "-b:v", bitrate,
             "-maxrate:v", bitrate,
-            "-bufsize:v", str(int(bitrate.rstrip("k")) * 2) + "k",
+            "-bufsize:v", video_bufsize,
             "-g", "15",
             "-bf", "0",
         ] + base_args
@@ -127,6 +139,8 @@ def video_encoder_args(output_codec: str, bitrate: str, use_hls_profile: bool = 
         "-profile:v", "main",
         "-level:v", "main",
         "-b:v", bitrate,
+        "-maxrate:v", bitrate,
+        "-bufsize:v", video_bufsize,
         "-g", "15",
         "-bf", "0",
     ] + base_args
@@ -200,8 +214,8 @@ def ffmpeg_transcode_stream(
         "-nostdin",
         "-fflags", "+genpts+discardcorrupt",
         "-flags", "low_delay",
-        "-analyzeduration", "3000000",
-        "-probesize", "3000000",
+        "-analyzeduration", FFMPEG_ANALYZE_US,
+        "-probesize", FFMPEG_PROBE_BYTES,
         "-allowed_extensions", "ALL",
         "-protocol_whitelist", "file,http,https,tcp,tls,crypto,udp,rtp",
         "-reconnect_at_eof", "1",
@@ -209,6 +223,7 @@ def ffmpeg_transcode_stream(
         "-reconnect_delay_max", "2",
         "-reconnect_on_network_error", "1",
         "-rw_timeout", "15000000",
+        "-thread_queue_size", "1024",
         "-user_agent", "VLC/3.0.20 LibVLC/3.0.20",
     ]
     if _needs_pluto_headers(source_url):
@@ -219,6 +234,7 @@ def ffmpeg_transcode_stream(
         "-i", source_url,
         "-map", "0:v:0?",
         "-map", "0:a:0?",
+        "-fps_mode", "cfr",
         "-dn",
         "-sn",
     ])
@@ -227,7 +243,7 @@ def ffmpeg_transcode_stream(
         "-b:a", "192k",
         "-ar", "48000",
         "-ac", "2",
-        "-af", "aresample=async=1:first_pts=0",
+        "-af", "aresample=async=1000:first_pts=0:min_hard_comp=0.100",
         "-f", output_format,
         "-mpegts_flags", "+resend_headers+pat_pmt_at_frames",
         "-mpegts_transport_stream_id", "1",
@@ -236,8 +252,8 @@ def ffmpeg_transcode_stream(
         "-metadata", "service_provider=VirtualHDHR",
         "-metadata", "service_name=VirtualHDHR",
         "-muxrate", "19392658",
-        "-muxpreload", "0",
-        "-muxdelay", "0",
+        "-muxpreload", "0.02",
+        "-muxdelay", "0.02",
         "-flush_packets", "1",
         "-pat_period", "0.10",
         "pipe:1",

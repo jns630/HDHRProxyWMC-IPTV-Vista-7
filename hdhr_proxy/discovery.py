@@ -70,6 +70,9 @@ USN: uuid:{device_id}::urn:schemas-silicondust-com:device:hdhomerun:1\r
 \r
 """
 
+FFMPEG_ANALYZE_US = "5000000"
+FFMPEG_PROBE_BYTES = "5000000"
+
 DEVICE_ID_CHECKSUM_TABLE = (0xA, 0x5, 0xF, 0x6, 0x7, 0xC, 0x1, 0xB, 0x9, 0x2, 0x8, 0xD, 0x4, 0x3, 0xE, 0x0)
 
 
@@ -1505,11 +1508,11 @@ class DiscoveryServer:
             return
 
         packet_size = 1316
-        packets_per_burst = 8
+        packets_per_burst = 4
         burst_size = packet_size * packets_per_burst
         # Keep the startup buffer modest so WMC sees bytes quickly on retunes.
-        buffer_target_bytes = min(max(burst_size * 2, transport_bps // 32), burst_size * 8)
-        buffer_max_bursts = max(128, (transport_bps * 2) // 8 // burst_size)
+        buffer_target_bytes = min(max(burst_size * 3, transport_bps // 24), burst_size * 10)
+        buffer_max_bursts = max(192, (transport_bps * 2) // 8 // burst_size)
         burst_queue: "queue.Queue[Optional[bytes]]" = queue.Queue(maxsize=buffer_max_bursts)
         bytes_sent = 0
         started_at = time.monotonic()
@@ -1550,7 +1553,7 @@ class DiscoveryServer:
 
             prebuffered: List[bytes] = []
             buffered_bytes = 0
-            prebuffer_deadline = time.monotonic() + 0.20
+            prebuffer_deadline = time.monotonic() + 0.22
             while not stop_event.is_set() and buffered_bytes < buffer_target_bytes and time.monotonic() < prebuffer_deadline:
                 try:
                     burst = burst_queue.get(timeout=0.1)
@@ -1878,8 +1881,8 @@ class DiscoveryServer:
             "-nostdin",
             "-fflags", "+genpts+discardcorrupt",
             "-flags", "low_delay",
-            "-analyzeduration", "3000000",
-            "-probesize", "3000000",
+            "-analyzeduration", FFMPEG_ANALYZE_US,
+            "-probesize", FFMPEG_PROBE_BYTES,
         ]
         if self._is_network_media_source(source_url):
             input_args.extend([
@@ -1893,6 +1896,7 @@ class DiscoveryServer:
             parsed = urllib.parse.urlparse(source_url or "")
             if parsed.path.lower().endswith((".m3u8", ".m3u")):
                 input_args.extend([
+                    "-thread_queue_size", "1024",
                     "-protocol_whitelist", "file,http,https,tcp,tls,crypto,udp,rtp",
                     "-allowed_extensions", "ALL",
                 ])
@@ -1902,6 +1906,7 @@ class DiscoveryServer:
                 ])
         elif self._looks_like_local_hls(source_url):
             input_args.extend([
+                "-thread_queue_size", "1024",
                 "-protocol_whitelist", "file,http,https,tcp,tls,crypto,udp,rtp",
                 "-allowed_extensions", "ALL",
             ])
@@ -1910,6 +1915,7 @@ class DiscoveryServer:
         return input_args + [
             "-map", "0:v:0?",
             "-map", "0:a:0?",
+            "-fps_mode", "cfr",
             "-dn",
             "-sn",
         ] + self._video_encoder_args(effective_bitrate, self._uses_hls_quality_profile(source_url)) + [
@@ -1917,7 +1923,7 @@ class DiscoveryServer:
             "-b:a", "192k",
             "-ar", "48000",
             "-ac", "2",
-            "-af", "aresample=async=1:first_pts=0",
+            "-af", "aresample=async=1000:first_pts=0:min_hard_comp=0.100",
             "-f", "mpegts",
             "-mpegts_flags", "+resend_headers+pat_pmt_at_frames",
             "-mpegts_transport_stream_id", str(ts_id),
@@ -1929,8 +1935,8 @@ class DiscoveryServer:
             "-metadata", "service_provider=VirtualHDHR",
             "-metadata", f"service_name={service_name}",
             "-muxrate", str(transport_bps),
-            "-muxpreload", "0",
-            "-muxdelay", "0",
+            "-muxpreload", "0.02",
+            "-muxdelay", "0.02",
             "-flush_packets", "1",
             "-pat_period", "0.10",
             "pipe:1",
@@ -1940,12 +1946,15 @@ class DiscoveryServer:
         codec = (self.output_codec or "mpeg2video").lower()
         vista_mode = bool(getattr(self, "force_vista_mode", False))
         frame_size = "720x480" if vista_mode else "1280x720"
+        video_bufsize = f"{max(self._bitrate_to_bps(effective_bitrate) // 500, 1000)}k"
         common = [
             "-pix_fmt", "yuv420p",
             "-r", "30000/1001",
             "-s", frame_size,
             "-aspect", "16:9",
             "-b:v", effective_bitrate,
+            "-maxrate:v", effective_bitrate,
+            "-bufsize:v", video_bufsize,
             "-g", "15",
             "-bf", "0",
         ]
@@ -1954,6 +1963,7 @@ class DiscoveryServer:
                 "-c:v", "libx264",
                 "-preset", "veryfast",
                 "-tune", "zerolatency",
+                "-x264-params", "nal-hrd=cbr:force-cfr=1",
                 "-profile:v", "high",
                 "-level:v", "4.0",
             ] + common
