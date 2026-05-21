@@ -705,6 +705,8 @@ class DiscoveryServer:
                 if self._filter_requests_playback_pids(state):
                     self._stop_psip_sender_locked(state)
                 self._refresh_tuner_status(tuner_idx)
+                if state.get("target") not in (None, "", "none") and not state.get("process"):
+                    self._set_tuner_target_locked(tuner_idx, state.get("target"))
             elif field == "lockkey":
                 if value == "force":
                     state["lockkey"] = "none"
@@ -988,6 +990,16 @@ class DiscoveryServer:
         else:
             channel_id = state.get("channel_id") or self._select_channel_id(state.get("program", ""))
         if channel_id not in self.channel_map:
+            if self._filter_requires_specific_program(state):
+                state["target"] = target
+                state["target_norm"] = ffmpeg_target
+                state["stream_rf_key"] = self._rf_stream_key(state.get("rf") or {})
+                logger.info(
+                    "Deferring stream start for tuner%s target %s until WMC requests a specific program",
+                    tuner_idx,
+                    target,
+                )
+                return
             # WMC often sets target while tuned to a scan RF that is not the actual IPTV channel.
             # Keep the current tuned channel text, but stream the real mapped channel.
             channel_id = self._select_channel_id("")
@@ -1112,13 +1124,10 @@ class DiscoveryServer:
         requested = self._literal_filter_pids(state.get("filter"))
         return video_pid in requested or audio_pid in requested
 
-    def _select_channel_for_filter_pids(self, state: Dict) -> Tuple[Optional[str], Optional[Dict]]:
+    def _filter_match_candidates(self, state: Dict) -> Tuple[List[Dict], List[Dict], int]:
         requested = self._requested_filter_pids(state.get("filter"))
         if not requested:
-            return None, None
-
-        current_rf = state.get("rf") or {}
-        current_physical = int(current_rf.get("physical") or 0)
+            return [], [], 0
         av_matches = [
             rf for rf in self._rf_channels
             if int(rf.get("video_pid") or 0) in requested
@@ -1128,6 +1137,24 @@ class DiscoveryServer:
             rf for rf in self._rf_channels
             if int(rf.get("pmt_pid") or 0) in requested
         ]
+        return av_matches, pmt_matches, len(requested)
+
+    def _filter_requires_specific_program(self, state: Dict) -> bool:
+        av_matches, pmt_matches, requested_count = self._filter_match_candidates(state)
+        if requested_count == 0:
+            return False
+        # WMC often requests a basket of PMT PIDs for many virtual subchannels before
+        # it has committed to one program. Starting the first channel here hijacks
+        # playback; wait for a later filter update with a specific program instead.
+        return not av_matches and len(pmt_matches) > 1
+
+    def _select_channel_for_filter_pids(self, state: Dict) -> Tuple[Optional[str], Optional[Dict]]:
+        av_matches, pmt_matches, requested_count = self._filter_match_candidates(state)
+        if requested_count == 0:
+            return None, None
+
+        current_rf = state.get("rf") or {}
+        current_physical = int(current_rf.get("physical") or 0)
         if current_physical:
             for rf in av_matches:
                 if int(rf.get("physical") or 0) == current_physical:
