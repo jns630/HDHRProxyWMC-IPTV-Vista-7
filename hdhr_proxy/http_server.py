@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Callable
 from urllib.parse import urlparse, parse_qs
 
 from .streamer import StreamSession
+from .xmltv import XMLTVData
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,7 @@ class HDHRRequestHandler(BaseHTTPRequestHandler):
     lineup: List[Dict] = []
     channel_map: Dict = {}
     config = None
+    xmltv_data: Optional[XMLTVData] = None
     on_stream_start: Optional[Callable] = None
     on_stream_stop: Optional[Callable] = None
     active_streams: Dict[str, threading.Event] = {}
@@ -68,6 +70,8 @@ class HDHRRequestHandler(BaseHTTPRequestHandler):
             "/lineup.json": self._handle_lineup_json,
             "/lineup.xml": self._handle_lineup_xml,
             "/lineup.m3u": self._handle_lineup_m3u,
+            "/xmltv.xml": self._handle_xmltv_xml,
+            "/epg.xml": self._handle_xmltv_xml,
             "/lineup_status.json": self._handle_lineup_status,
             "/device.xml": self._handle_device_xml,
         }
@@ -94,6 +98,7 @@ class HDHRRequestHandler(BaseHTTPRequestHandler):
             "BaseURL": get_base_url(self.config),
             "LineupURL": f"{get_base_url(self.config)}/lineup.json",
             "Channels": len(self.lineup),
+            "XMLTVURL": f"{get_base_url(self.config)}/xmltv.xml" if self.xmltv_data else None,
         }, indent=2)
         self._send_json(body)
 
@@ -108,6 +113,7 @@ class HDHRRequestHandler(BaseHTTPRequestHandler):
             "TunerCount": self.config.tuner_count,
             "BaseURL": get_base_url(self.config),
             "LineupURL": f"{get_base_url(self.config)}/lineup.json",
+            "XMLTVURL": f"{get_base_url(self.config)}/xmltv.xml" if self.xmltv_data else None,
         }, indent=2)
         self._send_json(body)
 
@@ -131,9 +137,20 @@ class HDHRRequestHandler(BaseHTTPRequestHandler):
         for item in self.lineup:
             guide = item.get("GuideNumber", "")
             name = item.get("GuideName", guide)
-            rows.append(f"#EXTINF:-1 channel-id=\"{guide}\" tvg-chno=\"{guide}\",{name}")
+            channel = self.channel_map.get(guide)
+            tvg_id = xml.sax.saxutils.escape(getattr(channel, "tvg_id", "") or "")
+            tvg_name = xml.sax.saxutils.escape(getattr(channel, "tvg_name", "") or name)
+            rows.append(
+                f"#EXTINF:-1 channel-id=\"{guide}\" tvg-id=\"{tvg_id}\" tvg-name=\"{tvg_name}\" tvg-chno=\"{guide}\",{name}"
+            )
             rows.append(str(item.get("URL", "")))
         self._send_text("\r\n".join(rows) + "\r\n", "audio/x-mpegurl; charset=utf-8")
+
+    def _handle_xmltv_xml(self):
+        if not self.xmltv_data:
+            self.send_error(404, "XMLTV not configured")
+            return
+        self._send_xml(self.xmltv_data.filtered_xml)
 
     def _handle_lineup_status(self):
         body = json.dumps({
@@ -265,12 +282,14 @@ class HDHRHTTPServer:
         lineup: List[Dict],
         channel_map: Dict,
         config,
+        xmltv_data: Optional[XMLTVData] = None,
     ):
         self.host = host
         self.port = port
         self.lineup = lineup
         self.channel_map = channel_map
         self.config = config
+        self.xmltv_data = xmltv_data
         self._server = None
         self._thread = None
 
@@ -278,6 +297,7 @@ class HDHRHTTPServer:
         HDHRRequestHandler.lineup = self.lineup
         HDHRRequestHandler.channel_map = self.channel_map
         HDHRRequestHandler.config = self.config
+        HDHRRequestHandler.xmltv_data = self.xmltv_data
         HDHRRequestHandler.active_streams = {}
 
         self._server = HTTPServer((self.host, self.port), HDHRRequestHandler)

@@ -5,6 +5,7 @@ import logging
 import time
 import io
 import threading
+import re
 from typing import Optional, Dict
 
 from .m3u_parser import M3UParser
@@ -27,6 +28,29 @@ def _needs_pluto_headers(source_url: str) -> bool:
     return "pluto.tv" in host or "jmp2.uk" in host
 
 
+def _is_hls_like_source(source_url: str) -> bool:
+    parsed = urllib.parse.urlparse(source_url or "")
+    scheme = parsed.scheme.lower()
+    if scheme and scheme not in ("http", "https", "file") and not re.fullmatch(r"[a-z]", scheme):
+        return False
+    path = parsed.path if scheme == "file" else (parsed.path or source_url)
+    return path.lower().endswith((".m3u8", ".m3u"))
+
+
+def _hls_profile_bitrate(bitrate: str) -> str:
+    text = str(bitrate or "").strip().lower()
+    match = re.match(r"^(\d+)([km]?)$", text)
+    if not match:
+        return bitrate
+    amount = int(match.group(1))
+    suffix = match.group(2) or ""
+    if suffix == "m":
+        return f"{amount}m"
+    if suffix == "k":
+        return f"{amount + 500}k"
+    return str(amount + 500)
+
+
 def _resolve_hls_source_url(source_url: str) -> str:
     parsed = urllib.parse.urlparse(source_url or "")
     if parsed.scheme.lower() not in ("http", "https"):
@@ -45,6 +69,7 @@ def _resolve_hls_source_url(source_url: str) -> str:
     try:
         req = urllib.request.Request(source_url, headers=headers)
         with urllib.request.urlopen(req, timeout=8) as resp:
+            base_url = resp.geturl() or source_url
             raw = resp.read(512 * 1024).decode("utf-8", errors="replace")
     except Exception:
         return source_url
@@ -53,7 +78,7 @@ def _resolve_hls_source_url(source_url: str) -> str:
     selected = M3UParser._select_hls_variant(variants)
     if not selected:
         return source_url
-    playback_url = urllib.parse.urljoin(source_url, selected)
+    playback_url = urllib.parse.urljoin(base_url, selected)
     if _should_keep_original_hls_url(source_url, playback_url):
         return source_url
     return playback_url
@@ -153,6 +178,7 @@ def ffmpeg_transcode_stream(
     output_format: str = "mpegts",
 ):
     source_url = _resolve_hls_source_url(source_url)
+    effective_bitrate = _hls_profile_bitrate(bitrate) if _is_hls_like_source(source_url) else bitrate
     cmd = [
         ffmpeg_path,
         "-hide_banner",
@@ -182,7 +208,7 @@ def ffmpeg_transcode_stream(
         "-dn",
         "-sn",
     ])
-    cmd += video_encoder_args(output_codec, bitrate) + [
+    cmd += video_encoder_args(output_codec, effective_bitrate) + [
         "-c:a", audio_codec,
         "-b:a", "192k",
         "-ar", "48000",

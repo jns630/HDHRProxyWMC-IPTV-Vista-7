@@ -223,8 +223,8 @@ python main.py --config config.json --tuners 4
 | `m3u_file` | Path to a local M3U/M3U8 playlist. | `null` |
 | `m3u_url` | URL to a remote M3U/M3U8 playlist. | `null` |
 | `hls_base_url` | Original URL for a saved local HLS playlist with relative variant paths. | `null` |
-| `xmltv_file` | Reserved for XMLTV data. | `null` |
-| `xmltv_url` | Reserved for XMLTV data. | `null` |
+| `xmltv_file` | Path to a local XMLTV guide file to serve from the proxy. | `null` |
+| `xmltv_url` | URL to a remote XMLTV guide file to fetch and serve from the proxy. | `null` |
 | `ffmpeg_path` | Path or command name for ffmpeg. | `ffmpeg` |
 | `ffmpeg_enabled` | Enables ffmpeg transcoding. | `true` |
 | `ffmpeg_output_codec` | Configured video codec. At runtime, WMC mode forces Vista to `mpeg2video` and Windows 7 or newer to `libx264` H.264/MPEG-4 AVC. | `mpeg2video` |
@@ -236,6 +236,59 @@ python main.py --config config.json --tuners 4
 | `lineup_source` | Advertised lineup source. The proxy forces this to `Antenna` for WMC behavior. | `Antenna` |
 
 ## Playlist Format
+
+## XMLTV / EPG
+
+The proxy can now load XMLTV guide data from either a local file or a remote URL and serve it back out at:
+
+- `/xmltv.xml`
+- `/epg.xml`
+
+Examples:
+
+```powershell
+python main.py --m3u-url "https://raw.githubusercontent.com/OwnerPlugins/pluto-tv-m3u/refs/heads/main/pluto-live-US.m3u" --xmltv-url "https://i.mjh.nz/PlutoTV/us.xml"
+```
+
+```powershell
+python main.py --m3u-file "us_pluto.m3u" --xmltv-file "guide.xml"
+```
+
+Notes:
+
+- If playlist entries include `tvg-id`, the proxy filters the XMLTV output down to just the matching channels and programmes.
+- If the playlist does not include `tvg-id`, the proxy serves the full XMLTV file unchanged.
+- The served guide URL is `http://<your-pc-ip>:5004/xmltv.xml`.
+
+### Generate and import WMC MXF
+
+The proxy can also convert XMLTV into a Windows Media Center MXF file and optionally import it with `loadmxf.exe`.
+
+Generate `guide.mxf`:
+
+```powershell
+python main.py --m3u-url "https://raw.githubusercontent.com/OwnerPlugins/pluto-tv-m3u/refs/heads/main/pluto-live-US.m3u" --xmltv-url "https://i.mjh.nz/PlutoTV/us.xml" --write-mxf
+```
+
+Generate and import into WMC:
+
+```powershell
+python main.py --m3u-url "https://raw.githubusercontent.com/OwnerPlugins/pluto-tv-m3u/refs/heads/main/pluto-live-US.m3u" --xmltv-url "https://i.mjh.nz/PlutoTV/us.xml" --import-mxf
+```
+
+Custom MXF path:
+
+```powershell
+python main.py --m3u-file "us_pluto.m3u" --xmltv-file "guide.xml" --mxf-file "C:\\Temp\\pluto-guide.mxf" --import-mxf
+```
+
+The import step uses:
+
+```powershell
+C:\Windows\ehome\loadmxf.exe -v -i guide.mxf
+```
+
+On this machine I verified that `loadmxf.exe` accepts the generated MXF structure in a test store.
 
 A normal IPTV playlist looks like this:
 

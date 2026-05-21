@@ -12,6 +12,7 @@ import threading
 import time
 import zlib
 import queue
+import tempfile
 import urllib.parse
 import urllib.request
 from typing import Callable, Dict, List, Optional, Tuple
@@ -278,6 +279,7 @@ class DiscoveryServer:
                 "psip_stop": None,
                 "psip_thread": None,
                 "channel_id": None,
+                "temp_source_path": None,
             }
             for i in range(max(0, tuner_count))
         }
@@ -906,6 +908,29 @@ class DiscoveryServer:
             return amount * 1000
         return amount
 
+    def _effective_bitrate(self, source_url: str) -> str:
+        if not self._uses_hls_quality_profile(source_url):
+            return self.bitrate
+        text = str(self.bitrate or "").strip().lower()
+        match = re.match(r"^(\d+)([km]?)$", text)
+        if not match:
+            return self.bitrate
+        amount = int(match.group(1))
+        suffix = match.group(2) or ""
+        if suffix == "m":
+            return f"{amount}m"
+        if suffix == "k":
+            return f"{amount + 500}k"
+        return str(amount + 500)
+
+    def _uses_hls_quality_profile(self, source_url: str) -> bool:
+        parsed = urllib.parse.urlparse(source_url or "")
+        scheme = parsed.scheme.lower()
+        if scheme and scheme not in ("http", "https", "file") and not re.fullmatch(r"[a-z]", scheme):
+            return False
+        path = parsed.path if scheme == "file" else (parsed.path or source_url)
+        return path.lower().endswith((".m3u8", ".m3u"))
+
     def _transport_bps(self) -> int:
         video_bps = self._bitrate_to_bps(self.bitrate)
         # AC3 defaults to 192k; give the MPEG-TS mux enough headroom for audio,
@@ -1063,7 +1088,7 @@ class DiscoveryServer:
         if not source_url:
             logger.warning("Channel %s has no source URL", channel_id)
             return
-        source_url = self._resolve_hls_source_url(source_url)
+        source_url, temp_source_path = self._prepare_ffmpeg_input_source(source_url)
 
         missing_variants = getattr(channel, "ext", {}).get("hls_missing_variants") if channel else None
         if missing_variants:
@@ -1111,11 +1136,76 @@ class DiscoveryServer:
         state["log_file"] = log_file
         state["stream_stop"] = stream_stop
         state["stream_thread"] = stream_thread
+        state["temp_source_path"] = temp_source_path
         if self._filter_requests_playback_pids(state):
             self._stop_psip_sender_locked(state)
         else:
             self._start_psip_sender_locked(state, stream_target)
         logger.info("Streaming channel %s to HDHR target %s (ffmpeg log: %s)", channel_id, target, log_path)
+
+    def _prepare_ffmpeg_input_source(self, source_url: str) -> Tuple[str, Optional[str]]:
+        local_master = self._build_local_pluto_master(source_url)
+        if local_master:
+            return local_master, local_master
+        return self._resolve_hls_source_url(source_url), None
+
+    def _build_local_pluto_master(self, source_url: str) -> Optional[str]:
+        parsed = urllib.parse.urlparse(source_url or "")
+        if parsed.scheme.lower() not in ("http", "https"):
+            return None
+        if not parsed.path.lower().endswith((".m3u8", ".m3u")):
+            return None
+        if not self._needs_pluto_headers(source_url):
+            return None
+
+        try:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122 Safari/537.36",
+                "Accept": "application/vnd.apple.mpegurl,application/x-mpegURL,*/*",
+                "Origin": "https://pluto.tv",
+                "Referer": "https://pluto.tv/",
+            }
+            with urllib.request.urlopen(urllib.request.Request(source_url, headers=headers), timeout=8) as resp:
+                base_url = resp.geturl() or source_url
+                raw = resp.read(512 * 1024).decode("utf-8", errors="replace")
+        except Exception as exc:
+            logger.debug("Unable to build local Pluto HLS master for %s: %s", source_url, exc)
+            return None
+
+        variants = M3UParser._hls_variant_uris(raw)
+        selected = M3UParser._select_hls_variant(variants)
+        if not selected:
+            return None
+
+        selected_attrs = {}
+        for uri, attrs in variants:
+            if uri == selected:
+                selected_attrs = attrs
+                break
+        audio_match = re.search(r'#EXT-X-MEDIA:TYPE=AUDIO[^\n]*URI="([^"]+)"', raw)
+        audio_url = urllib.parse.urljoin(base_url, audio_match.group(1)) if audio_match else None
+        video_url = urllib.parse.urljoin(base_url, selected)
+        bandwidth = selected_attrs.get("average-bandwidth") or selected_attrs.get("bandwidth") or "3000000"
+
+        lines = [
+            "#EXTM3U",
+            "#EXT-X-VERSION:5",
+        ]
+        if audio_url:
+            lines.append(
+                f'#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",LANGUAGE="en",NAME="English",AUTOSELECT=YES,DEFAULT=YES,CHANNELS="2",URI="{audio_url}"'
+            )
+        stream_inf = f"#EXT-X-STREAM-INF:PROGRAM-ID=1,BANDWIDTH={bandwidth}"
+        if audio_url:
+            stream_inf += ',AUDIO="audio"'
+        lines.extend([stream_inf, video_url, ""])
+
+        fd, path = tempfile.mkstemp(prefix="hdhr_pluto_", suffix=".m3u8", text=True)
+        os.close(fd)
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write("\n".join(lines))
+        logger.info("Using local Pluto HLS master for playback: %s", path)
+        return path
 
     def _resolve_hls_source_url(self, source_url: str) -> str:
         parsed = urllib.parse.urlparse(source_url or "")
@@ -1142,6 +1232,7 @@ class DiscoveryServer:
                 headers=headers,
             )
             with urllib.request.urlopen(req, timeout=8) as resp:
+                base_url = resp.geturl() or source_url
                 raw = resp.read(512 * 1024).decode("utf-8", errors="replace")
         except Exception as exc:
             logger.debug("Unable to inspect HLS source %s: %s", source_url, exc)
@@ -1152,7 +1243,7 @@ class DiscoveryServer:
         if not selected:
             return source_url
 
-        playback_url = urllib.parse.urljoin(source_url, selected)
+        playback_url = urllib.parse.urljoin(base_url, selected)
         if self._should_keep_original_hls_url(source_url, playback_url):
             return source_url
         self._hls_variant_cache[source_url] = (playback_url, now + 300)
@@ -1269,6 +1360,9 @@ class DiscoveryServer:
         if psip_stop:
             psip_stop.set()
 
+        temp_source_path = state.get("temp_source_path")
+        state["temp_source_path"] = None
+
         proc = state.get("process")
         state["process"] = None
         stream_stop = state.get("stream_stop")
@@ -1281,6 +1375,11 @@ class DiscoveryServer:
         if not proc or proc.poll() is not None:
             if log_file:
                 log_file.close()
+            if temp_source_path and os.path.exists(temp_source_path):
+                try:
+                    os.unlink(temp_source_path)
+                except OSError:
+                    pass
             return
         proc.terminate()
         try:
@@ -1289,6 +1388,11 @@ class DiscoveryServer:
             proc.kill()
         if log_file:
             log_file.close()
+        if temp_source_path and os.path.exists(temp_source_path):
+            try:
+                os.unlink(temp_source_path)
+            except OSError:
+                pass
 
     def _target_to_udp_addr(self, target: str) -> Optional[Tuple[str, int]]:
         parsed = urllib.parse.urlparse(target or "")
@@ -1664,6 +1768,7 @@ class DiscoveryServer:
         ts_id = int(rf.get("physical", 1)) if rf else 1
         service_name = rf.get("name", "VirtualHD") if rf else "VirtualHD"
         transport_bps = self._transport_bps()
+        effective_bitrate = self._effective_bitrate(source_url)
         pmt_pid = int(rf.get("pmt_pid") or 0x31) if rf else 0x31
         video_pid = int(rf.get("video_pid") or 0x41) if rf else 0x41
         audio_pid = int(rf.get("audio_pid") or 0x51) if rf else 0x51
@@ -1673,6 +1778,7 @@ class DiscoveryServer:
             "-loglevel", "info",
             "-nostdin",
             "-fflags", "+genpts+discardcorrupt",
+            "-flags", "low_delay",
             "-analyzeduration", "3000000",
             "-probesize", "3000000",
         ]
@@ -1685,6 +1791,12 @@ class DiscoveryServer:
                 "-reconnect_on_network_error", "1",
                 "-user_agent", "VLC/3.0.20 LibVLC/3.0.20",
             ])
+            parsed = urllib.parse.urlparse(source_url or "")
+            if parsed.path.lower().endswith((".m3u8", ".m3u")):
+                input_args.extend([
+                    "-protocol_whitelist", "file,http,https,tcp,tls,crypto,udp,rtp",
+                    "-allowed_extensions", "ALL",
+                ])
             if self._needs_pluto_headers(source_url):
                 input_args.extend([
                     "-headers", "Accept: application/vnd.apple.mpegurl,application/x-mpegURL,*/*\r\nOrigin: https://pluto.tv\r\nReferer: https://pluto.tv/\r\n",
@@ -1701,7 +1813,7 @@ class DiscoveryServer:
             "-map", "0:a:0?",
             "-dn",
             "-sn",
-        ] + self._video_encoder_args() + [
+        ] + self._video_encoder_args(effective_bitrate) + [
             "-c:a", "ac3",
             "-b:a", "192k",
             "-ar", "48000",
@@ -1722,14 +1834,14 @@ class DiscoveryServer:
             "pipe:1",
         ]
 
-    def _video_encoder_args(self) -> List[str]:
+    def _video_encoder_args(self, effective_bitrate: str) -> List[str]:
         codec = (self.output_codec or "mpeg2video").lower()
         common = [
             "-pix_fmt", "yuv420p",
             "-r", "30000/1001",
             "-s", "1280x720",
             "-aspect", "16:9",
-            "-b:v", self.bitrate,
+            "-b:v", effective_bitrate,
             "-g", "15",
             "-bf", "0",
         ]

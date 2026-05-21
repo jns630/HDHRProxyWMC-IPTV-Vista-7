@@ -25,6 +25,8 @@ from hdhr_proxy.config import Config
 from hdhr_proxy.m3u_parser import M3UParser, build_lineup
 from hdhr_proxy.discovery import DiscoveryServer, normalize_device_id
 from hdhr_proxy.http_server import HDHRHTTPServer
+from hdhr_proxy.mxf import write_mxf, import_mxf
+from hdhr_proxy.xmltv import load_xmltv
 
 logging.basicConfig(
     level=logging.INFO,
@@ -259,6 +261,16 @@ def run_proxy(cfg: Config):
         channel_mapping=cfg.channel_mapping,
         tuner_count=cfg.tuner_count,
     )
+    xmltv_data = load_xmltv(cfg.xmltv_file, cfg.xmltv_url, channel_map)
+    if xmltv_data:
+        logger.info("Loaded XMLTV guide from %s", xmltv_data.source)
+        if cfg.write_mxf or cfg.import_mxf:
+            mxf_path = write_mxf(xmltv_data.filtered_xml, lineup, channel_map, cfg.mxf_file)
+            if cfg.import_mxf:
+                import_mxf(mxf_path)
+    elif cfg.write_mxf or cfg.import_mxf:
+        logger.error("MXF generation/import requires --xmltv-file or --xmltv-url.")
+        sys.exit(1)
     logger.info(f"Lineup has {len(lineup)} channels")
     mapping_path = write_hdhrproxy_mapping_file(lineup)
     logger.info(f"Wrote HDHRProxyIPTV-style mapping list: {mapping_path}")
@@ -272,6 +284,7 @@ def run_proxy(cfg: Config):
         lineup=lineup,
         channel_map=channel_map,
         config=cfg,
+        xmltv_data=xmltv_data,
     )
     http_server.start()
 
@@ -342,6 +355,11 @@ Examples:
     # M3U sources
     parser.add_argument("--m3u-file", help="Path to local M3U/M3U8 file")
     parser.add_argument("--m3u-url", help="URL to remote M3U/M3U8 playlist")
+    parser.add_argument("--xmltv-file", help="Path to local XMLTV guide file")
+    parser.add_argument("--xmltv-url", help="URL to remote XMLTV guide file")
+    parser.add_argument("--mxf-file", default="guide.mxf", help="Output Windows Media Center MXF guide path")
+    parser.add_argument("--write-mxf", action="store_true", help="Generate a Windows Media Center MXF guide file")
+    parser.add_argument("--import-mxf", action="store_true", help="Generate and import the MXF guide into Windows Media Center")
     parser.add_argument(
         "--hls-base-url",
         help="Original web URL for a saved HLS master playlist that uses relative variant/segment URLs",
@@ -384,6 +402,16 @@ Examples:
         cfg.m3u_url = args.m3u_url
     if args.hls_base_url:
         cfg.hls_base_url = args.hls_base_url
+    if args.xmltv_file:
+        cfg.xmltv_file = args.xmltv_file
+    if args.xmltv_url:
+        cfg.xmltv_url = args.xmltv_url
+    if args.mxf_file:
+        cfg.mxf_file = args.mxf_file
+    if args.write_mxf:
+        cfg.write_mxf = True
+    if args.import_mxf:
+        cfg.import_mxf = True
     if args.port:
         cfg.http_port = args.port
     if args.listen_ip:
