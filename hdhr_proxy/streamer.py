@@ -1,4 +1,5 @@
 import subprocess
+import urllib.parse
 import urllib.request
 import logging
 import time
@@ -6,31 +7,57 @@ import io
 import threading
 from typing import Optional, Dict
 
+from .m3u_parser import M3UParser
+
 logger = logging.getLogger(__name__)
 
 STREAM_READ_CHUNK = 131072  # 128KB
 FFMPEG_READ_TIMEOUT = 5.0
 FFMPEG_INPUT_OPTIONS = [
-    "-fflags", "+genpts+nobuffer",
+    "-fflags", "+genpts+discardcorrupt",
     "-flags", "low_delay",
-    "-analyzeduration", "500000",
-    "-probesize", "1000000",
+    "-analyzeduration", "3000000",
+    "-probesize", "3000000",
+    "-rw_timeout", "15000000",
 ]
+
+
+def _needs_pluto_headers(source_url: str) -> bool:
+    host = urllib.parse.urlparse(source_url or "").netloc.lower()
+    return "pluto.tv" in host
+
+
+def _resolve_hls_source_url(source_url: str) -> str:
+    parsed = urllib.parse.urlparse(source_url or "")
+    if parsed.scheme.lower() not in ("http", "https"):
+        return source_url
+    if not parsed.path.lower().endswith((".m3u8", ".m3u")):
+        return source_url
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122 Safari/537.36",
+        "Accept": "application/vnd.apple.mpegurl,application/x-mpegURL,*/*",
+    }
+    if _needs_pluto_headers(source_url):
+        headers["Origin"] = "https://pluto.tv"
+        headers["Referer"] = "https://pluto.tv/"
+
+    try:
+        req = urllib.request.Request(source_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            raw = resp.read(512 * 1024).decode("utf-8", errors="replace")
+    except Exception:
+        return source_url
+
+    variants = M3UParser._hls_variant_uris(raw)
+    selected = M3UParser._select_hls_variant(variants)
+    if not selected:
+        return source_url
+    return urllib.parse.urljoin(source_url, selected)
 
 
 def video_encoder_args(output_codec: str, bitrate: str):
     codec = (output_codec or "mpeg2video").lower()
-    common = [
-        "-b:v", bitrate,
-        "-maxrate:v", bitrate,
-        "-bufsize:v", str(int(bitrate.rstrip("k")) * 2) + "k",
-        "-g", "15",
-        "-bf", "0",
-        "-pix_fmt", "yuv420p",
-        "-r", "30000/1001",
-        "-s", "1280x720",
-        "-aspect", "16:9",
-    ]
     if codec in ("h264", "libx264", "mpeg4_h264", "mpeg4-avc", "avc"):
         return [
             "-c:v", "libx264",
@@ -38,12 +65,29 @@ def video_encoder_args(output_codec: str, bitrate: str):
             "-tune", "zerolatency",
             "-profile:v", "high",
             "-level:v", "4.0",
-        ] + common
+            "-b:v", bitrate,
+            "-maxrate:v", bitrate,
+            "-bufsize:v", str(int(bitrate.rstrip("k")) * 2) + "k",
+            "-g", "15",
+            "-bf", "0",
+            "-pix_fmt", "yuv420p",
+            "-r", "30000/1001",
+            "-s", "1280x720",
+            "-aspect", "16:9",
+        ]
+    # mpeg2video — avoid VBV constraints that cause "impossible bitrate constraints" error
     return [
         "-c:v", "mpeg2video",
         "-profile:v", "main",
         "-level:v", "main",
-    ] + common
+        "-b:v", bitrate,
+        "-g", "15",
+        "-bf", "0",
+        "-pix_fmt", "yuv420p",
+        "-r", "30000/1001",
+        "-s", "1280x720",
+        "-aspect", "16:9",
+    ]
 
 
 def ffmpeg_available(ffmpeg_path: str = "ffmpeg") -> bool:
@@ -90,14 +134,16 @@ def ffmpeg_transcode_stream(
     bitrate: str = "4000k",
     output_format: str = "mpegts",
 ):
+    source_url = _resolve_hls_source_url(source_url)
     cmd = [
         ffmpeg_path,
         "-hide_banner",
         "-loglevel", "warning",
-        "-fflags", "+genpts+nobuffer",
+        "-nostdin",
+        "-fflags", "+genpts+discardcorrupt",
         "-flags", "low_delay",
-        "-analyzeduration", "500000",
-        "-probesize", "1000000",
+        "-analyzeduration", "3000000",
+        "-probesize", "3000000",
         "-allowed_extensions", "ALL",
         "-protocol_whitelist", "file,http,https,tcp,tls,crypto,udp,rtp",
         "-reconnect_at_eof", "1",
@@ -106,27 +152,33 @@ def ffmpeg_transcode_stream(
         "-reconnect_on_network_error", "1",
         "-rw_timeout", "15000000",
         "-user_agent", "VLC/3.0.20 LibVLC/3.0.20",
+    ]
+    if _needs_pluto_headers(source_url):
+        cmd.extend([
+            "-headers", "Accept: application/vnd.apple.mpegurl,application/x-mpegURL,*/*\r\nOrigin: https://pluto.tv\r\nReferer: https://pluto.tv/\r\n",
+        ])
+    cmd.extend([
         "-i", source_url,
         "-map", "0:v:0?",
         "-map", "0:a:0?",
         "-dn",
         "-sn",
-    ] + video_encoder_args(output_codec, bitrate) + [
+    ])
+    cmd += video_encoder_args(output_codec, bitrate) + [
         "-c:a", audio_codec,
         "-b:a", "192k",
         "-ar", "48000",
         "-ac", "2",
+        "-af", "aresample=async=1:first_pts=0",
         "-f", output_format,
-        "-mpegts_flags", "+resend_headers+system_b",
+        "-mpegts_flags", "+resend_headers+pat_pmt_at_frames",
         "-mpegts_transport_stream_id", "1",
         "-mpegts_service_id", "3",
         "-mpegts_service_type", "digital_tv",
         "-metadata", "service_provider=VirtualHDHR",
         "-metadata", "service_name=VirtualHDHR",
         "-muxrate", "19392658",
-        "-muxdelay", "0",
-        "-muxpreload", "0",
-        "-flush_packets", "1",
+        "-pat_period", "0.10",
         "pipe:1",
     ]
     logger.debug("ffmpeg command: %s", " ".join(cmd))

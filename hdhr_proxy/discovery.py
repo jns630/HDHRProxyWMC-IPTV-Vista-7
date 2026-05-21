@@ -1075,14 +1075,16 @@ class DiscoveryServer:
             return cached[0]
 
         try:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122 Safari/537.36",
+                "Accept": "application/vnd.apple.mpegurl,application/x-mpegURL,*/*",
+            }
+            if self._needs_pluto_headers(source_url):
+                headers["Origin"] = "https://pluto.tv"
+                headers["Referer"] = "https://pluto.tv/"
             req = urllib.request.Request(
                 source_url,
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122 Safari/537.36",
-                    "Accept": "application/vnd.apple.mpegurl,application/x-mpegURL,*/*",
-                    "Origin": "https://pluto.tv",
-                    "Referer": "https://pluto.tv/",
-                },
+                headers=headers,
             )
             with urllib.request.urlopen(req, timeout=8) as resp:
                 raw = resp.read(512 * 1024).decode("utf-8", errors="replace")
@@ -1579,8 +1581,11 @@ class DiscoveryServer:
                 "-reconnect_delay_max", "2",
                 "-reconnect_on_network_error", "1",
                 "-user_agent", "VLC/3.0.20 LibVLC/3.0.20",
-                "-headers", "Accept: application/vnd.apple.mpegurl,application/x-mpegURL,*/*\r\nOrigin: https://pluto.tv\r\nReferer: https://pluto.tv/\r\n",
             ])
+            if self._needs_pluto_headers(source_url):
+                input_args.extend([
+                    "-headers", "Accept: application/vnd.apple.mpegurl,application/x-mpegURL,*/*\r\nOrigin: https://pluto.tv\r\nReferer: https://pluto.tv/\r\n",
+                ])
         elif self._looks_like_local_hls(source_url):
             input_args.extend([
                 "-protocol_whitelist", "file,http,https,tcp,tls,crypto,udp,rtp",
@@ -1641,6 +1646,10 @@ class DiscoveryServer:
 
     def _is_network_media_source(self, source_url: str) -> bool:
         return urllib.parse.urlparse(source_url or "").scheme.lower() in ("http", "https")
+
+    def _needs_pluto_headers(self, source_url: str) -> bool:
+        host = urllib.parse.urlparse(source_url or "").netloc.lower()
+        return "pluto.tv" in host
 
     def _looks_like_local_hls(self, source_url: str) -> bool:
         parsed = urllib.parse.urlparse(source_url or "")
