@@ -127,7 +127,7 @@ The checked-in `requirements.txt` intentionally has no required runtime packages
      "device_name": "Virtual HDHR Proxy",
      "model_number": "HDHR4-2US",
      "firmware_version": "20140101",
-     "tuner_count": 2,
+     "tuner_count": 4,
      "http_port": 5004,
      "listen_ip": "0.0.0.0",
      "m3u_file": "playlists/channels.m3u",
@@ -218,7 +218,7 @@ python main.py --config config.json --tuners 4
 | `device_name` | Friendly device name shown to clients. | `Virtual HDHR Proxy` |
 | `model_number` | Advertised HDHomeRun model. | `HDHR4-2US` |
 | `firmware_version` | Advertised firmware version. | `20140101` |
-| `tuner_count` | Number of simultaneous virtual tuners/streams allowed. | `2` |
+| `tuner_count` | Number of simultaneous virtual tuners/streams allowed. | `4` |
 | `http_port` | HTTP API and stream port. | `5004` |
 | `listen_ip` | Bind address. Use `0.0.0.0` for all interfaces. | `0.0.0.0` |
 | `m3u_file` | Path to a local M3U/M3U8 playlist. | `null` |

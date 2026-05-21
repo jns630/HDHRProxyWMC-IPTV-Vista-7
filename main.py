@@ -419,7 +419,7 @@ Examples:
     parser.add_argument("--device-id", default="104FFFFF", help="8-char hex Device ID")
     parser.add_argument("--device-name", default="Virtual HDHR Proxy", help="Friendly name")
     parser.add_argument("--model", default="HDHR4-2US", help="Model number")
-    parser.add_argument("--tuners", type=int, default=2, help="Number of virtual tuners")
+    parser.add_argument("--tuners", type=int, default=4, help="Number of virtual tuners")
 
     # Network
     parser.add_argument("--port", type=int, default=5004, help="HTTP server port")

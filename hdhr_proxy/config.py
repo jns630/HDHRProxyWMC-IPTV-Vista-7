@@ -7,7 +7,7 @@ DEFAULT_CONFIG = {
     "device_name": "Virtual HDHR Proxy",
     "model_number": "HDHR4-2US",
     "firmware_version": "20140101",
-    "tuner_count": 2,
+    "tuner_count": 4,
     "http_port": 5004,
     "listen_ip": "0.0.0.0",
     "m3u_url": None,
