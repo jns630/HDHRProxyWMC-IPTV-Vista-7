@@ -1187,6 +1187,8 @@ class DiscoveryServer:
         av_matches, pmt_matches, requested_count = self._filter_match_candidates(state)
         if requested_count == 0:
             return None, None
+        if not av_matches and len(pmt_matches) > 1:
+            return None, None
 
         current_rf = state.get("rf") or {}
         current_physical = int(current_rf.get("physical") or 0)
