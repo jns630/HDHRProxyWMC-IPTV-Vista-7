@@ -73,7 +73,7 @@ def _build_channel_metadata(
             "xmltv_id": xmltv_id,
             "source_tvg_id": tvg_id,
             "service_name": str(item.get("GuideName") or getattr(channel, "name", guide_number)),
-            "call_sign": _make_call_sign(str(item.get("GuideName") or getattr(channel, "name", guide_number))),
+            "call_sign": make_call_sign(str(item.get("GuideName") or getattr(channel, "name", guide_number))),
         }
     return meta_by_service
 
@@ -336,7 +336,7 @@ def _to_mxf_time(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
-def _make_call_sign(name: str) -> str:
+def make_call_sign(name: str) -> str:
     text = "".join(ch for ch in (name or "").upper() if ch.isalnum())
     if not text:
         return "HDHR"

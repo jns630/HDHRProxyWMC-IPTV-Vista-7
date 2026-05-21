@@ -18,6 +18,8 @@ DEFAULT_CONFIG = {
     "mxf_file": "guide.mxf",
     "write_mxf": False,
     "import_mxf": False,
+    "guide_only_lineup": False,
+    "force_vista_mode": False,
     "ffmpeg_path": r"D:\WMC_EPG\New folder (4)\hdhr_proxy\ffmpeg\ffmpeg-2026-05-18-git-b4d11dffbf-essentials_build\bin\ffmpeg.exe",
     "ffmpeg_enabled": True,
     "ffmpeg_output_codec": "mpeg2video",

@@ -2,9 +2,9 @@ import json
 import logging
 import threading
 import xml.sax.saxutils
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from typing import Dict, List, Optional, Callable
-from urllib.parse import urlparse, parse_qs
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from typing import Callable, Dict, List, Optional
+from urllib.parse import parse_qs, urlparse
 
 from .streamer import StreamSession
 from .xmltv import XMLTVData
@@ -63,7 +63,7 @@ class HDHRRequestHandler(BaseHTTPRequestHandler):
         path = parsed.path.rstrip("/") or "/"
         query = parse_qs(parsed.query)
 
-        logger.info(f"HTTP GET {path}")
+        logger.info("HTTP GET %s", path)
 
         handlers = {
             "/discover.json": self._handle_discover_json,
@@ -79,47 +79,50 @@ class HDHRRequestHandler(BaseHTTPRequestHandler):
         if path in handlers:
             handlers[path]()
         elif path.startswith("/stream/"):
-            channel_id = path[len("/stream/"):]
+            channel_id = path[len("/stream/") :]
             self._handle_stream(channel_id, query)
+        elif path in ("/", ""):
+            self._handle_root()
         else:
-            # Serve a simple status page for the root
-            if path == "/" or path == "":
-                self._handle_root()
-            else:
-                self.send_error(404, "Not Found")
+            self.send_error(404, "Not Found")
 
     def _handle_root(self):
-        body = json.dumps({
-            "FriendlyName": self.config.device_name,
-            "ModelNumber": self.config.model_number,
-            "FirmwareVersion": self.config.firmware_version,
-            "DeviceID": self.config.device_id,
-            "TunerCount": self.config.tuner_count,
-            "BaseURL": get_base_url(self.config),
-            "LineupURL": f"{get_base_url(self.config)}/lineup.json",
-            "Channels": len(self.lineup),
-            "XMLTVURL": f"{get_base_url(self.config)}/xmltv.xml" if self.xmltv_data else None,
-        }, indent=2)
+        body = json.dumps(
+            {
+                "FriendlyName": self.config.device_name,
+                "ModelNumber": self.config.model_number,
+                "FirmwareVersion": self.config.firmware_version,
+                "DeviceID": self.config.device_id,
+                "TunerCount": self.config.tuner_count,
+                "BaseURL": get_base_url(self.config),
+                "LineupURL": f"{get_base_url(self.config)}/lineup.json",
+                "Channels": len(self.lineup),
+                "XMLTVURL": f"{get_base_url(self.config)}/xmltv.xml" if self.xmltv_data else None,
+            },
+            indent=2,
+        )
         self._send_json(body)
 
     def _handle_discover_json(self):
-        body = json.dumps({
-            "FriendlyName": self.config.device_name,
-            "ModelNumber": self.config.model_number,
-            "FirmwareName": "hdhr4_linux",
-            "FirmwareVersion": self.config.firmware_version,
-            "DeviceID": self.config.device_id,
-            "DeviceAuth": "virtual",
-            "TunerCount": self.config.tuner_count,
-            "BaseURL": get_base_url(self.config),
-            "LineupURL": f"{get_base_url(self.config)}/lineup.json",
-            "XMLTVURL": f"{get_base_url(self.config)}/xmltv.xml" if self.xmltv_data else None,
-        }, indent=2)
+        body = json.dumps(
+            {
+                "FriendlyName": self.config.device_name,
+                "ModelNumber": self.config.model_number,
+                "FirmwareName": "hdhr4_linux",
+                "FirmwareVersion": self.config.firmware_version,
+                "DeviceID": self.config.device_id,
+                "DeviceAuth": "virtual",
+                "TunerCount": self.config.tuner_count,
+                "BaseURL": get_base_url(self.config),
+                "LineupURL": f"{get_base_url(self.config)}/lineup.json",
+                "XMLTVURL": f"{get_base_url(self.config)}/xmltv.xml" if self.xmltv_data else None,
+            },
+            indent=2,
+        )
         self._send_json(body)
 
     def _handle_lineup_json(self):
-        body = json.dumps(self.lineup, indent=2)
-        self._send_json(body)
+        self._send_json(json.dumps(self.lineup, indent=2))
 
     def _handle_lineup_xml(self):
         rows = ['<?xml version="1.0" encoding="UTF-8"?>', "<Lineup>"]
@@ -153,13 +156,16 @@ class HDHRRequestHandler(BaseHTTPRequestHandler):
         self._send_xml(self.xmltv_data.filtered_xml)
 
     def _handle_lineup_status(self):
-        body = json.dumps({
-            "ScanInProgress": 0,
-            "ScanPossible": 1,
-            "Source": self.config.lineup_source,
-            "SourceList": [self.config.lineup_source],
-            "SupportedTypes": [self.config.lineup_source],
-        }, indent=2)
+        body = json.dumps(
+            {
+                "ScanInProgress": 0,
+                "ScanPossible": 1,
+                "Source": self.config.lineup_source,
+                "SourceList": [self.config.lineup_source],
+                "SupportedTypes": [self.config.lineup_source],
+            },
+            indent=2,
+        )
         self._send_json(body)
 
     def _handle_device_xml(self):
@@ -171,22 +177,23 @@ class HDHRRequestHandler(BaseHTTPRequestHandler):
             base_url=get_base_url(self.config),
             tuner_count=self.config.tuner_count,
         )
+        encoded = xml.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/xml; charset=utf-8")
-        self.send_header("Content-Length", str(len(xml.encode("utf-8"))))
+        self.send_header("Content-Length", str(len(encoded)))
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
-        self.wfile.write(xml.encode("utf-8"))
+        self.wfile.write(encoded)
 
     def _handle_stream(self, channel_id: str, query: Dict):
+        del query
         if channel_id not in self.channel_map:
             self.send_error(404, f"Channel {channel_id} not found")
             return
 
-        # Check tuner limit
         active_count = len(self.active_streams)
         if active_count >= self.config.tuner_count:
-            logger.warning(f"Max tuners ({self.config.tuner_count}) reached, rejecting {channel_id}")
+            logger.warning("Max tuners (%s) reached, rejecting %s", self.config.tuner_count, channel_id)
             self.send_error(503, "All tuners in use")
             return
 
@@ -205,6 +212,7 @@ class HDHRRequestHandler(BaseHTTPRequestHandler):
                 output_codec=self.config.ffmpeg_output_codec,
                 audio_codec=self.config.ffmpeg_audio_codec,
                 bitrate=self.config.ffmpeg_bitrate,
+                vista_mode=bool(getattr(self.config, "force_vista_mode", False)),
             )
 
             self.send_response(200)
@@ -219,13 +227,12 @@ class HDHRRequestHandler(BaseHTTPRequestHandler):
             for chunk in session.stream():
                 if stop_event.is_set():
                     break
-                if chunk:
-                    # Chunked transfer encoding
-                    chunk_len = hex(len(chunk))[2:].encode("ascii")
-                    self.wfile.write(chunk_len + b"\r\n" + chunk + b"\r\n")
-                    self.wfile.flush()
+                if not chunk:
+                    continue
+                chunk_len = hex(len(chunk))[2:].encode("ascii")
+                self.wfile.write(chunk_len + b"\r\n" + chunk + b"\r\n")
+                self.wfile.flush()
 
-            # End chunked transfer
             try:
                 self.wfile.write(b"0\r\n\r\n")
                 self.wfile.flush()
@@ -233,7 +240,7 @@ class HDHRRequestHandler(BaseHTTPRequestHandler):
                 pass
 
         except Exception as e:
-            logger.error(f"Stream error for {channel_id}: {e}")
+            logger.error("Stream error for %s: %s", channel_id, e)
             try:
                 self.send_error(500, f"Stream error: {e}")
             except OSError:
@@ -242,7 +249,7 @@ class HDHRRequestHandler(BaseHTTPRequestHandler):
             self.active_streams.pop(channel_id, None)
             if self.on_stream_stop:
                 self.on_stream_stop(channel_id)
-            logger.info(f"Stream ended for channel {channel_id}")
+            logger.info("Stream ended for channel %s", channel_id)
 
     def _send_json(self, body: str):
         encoded = body.encode("utf-8")
@@ -268,7 +275,7 @@ class HDHRRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(encoded)
 
     def log_message(self, fmt, *args):
-        logger.debug(f"HTTP: {fmt % args}")
+        logger.debug("HTTP: %s", fmt % args)
 
     def do_HEAD(self):
         self.do_GET()
@@ -307,7 +314,7 @@ class HDHRHTTPServer:
             name="http-server",
         )
         self._thread.start()
-        logger.info(f"HTTP server started on http://{self.host}:{self.port}")
+        logger.info("HTTP server started on http://%s:%s", self.host, self.port)
 
     def stop(self):
         if self._server:

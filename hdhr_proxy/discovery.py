@@ -236,6 +236,7 @@ class DiscoveryServer:
         output_codec: str = "mpeg2video",
         audio_codec: str = "ac3",
         bitrate: str = "4000k",
+        force_vista_mode: bool = False,
     ):
         self.device_id = device_id
         self.base_url = base_url
@@ -253,12 +254,14 @@ class DiscoveryServer:
         self.output_codec = output_codec
         self.audio_codec = audio_codec
         self.bitrate = bitrate
+        self.force_vista_mode = force_vista_mode
         self._reported_firmware_version = firmware_version
         self._upgrade_target_firmware_version = self._infer_upgrade_target_version()
         self._lineup_scan_active = False
         self._lineup_scan_map = "us-bcast"
         self._lineup_scan_started_at = 0.0
         self._hls_variant_cache: Dict[str, Tuple[str, float]] = {}
+        self._prepared_input_cache: Dict[str, Tuple[str, float]] = {}
         self._state_lock = threading.Lock()
         self._rf_channels = self._build_rf_channel_map()
         self._tuner_state = {
@@ -280,6 +283,7 @@ class DiscoveryServer:
                 "psip_thread": None,
                 "channel_id": None,
                 "temp_source_path": None,
+                "stream_announced": False,
             }
             for i in range(max(0, tuner_count))
         }
@@ -688,14 +692,17 @@ class DiscoveryServer:
                 self._refresh_tuner_status(tuner_idx)
             elif field == "program":
                 state["program"] = value or "none"
-                channel_id, rf = self._select_program_for_current_tune(state, value)
-                if channel_id is None:
-                    channel_id, rf = self._select_channel_for_tune(value)
+                if self._program_requests_specific_program(value):
+                    channel_id, rf = self._select_program_for_current_tune(state, value)
                     if channel_id is None:
-                        channel_id, rf = self._virtual_rf_for_current_tune(value)
-                state["channel_id"] = channel_id
-                state["rf"] = rf
+                        channel_id, rf = self._select_channel_for_tune(value)
+                        if channel_id is None:
+                            channel_id, rf = self._virtual_rf_for_current_tune(value)
+                    state["channel_id"] = channel_id
+                    state["rf"] = rf
                 self._refresh_tuner_status(tuner_idx)
+                if self._program_requests_specific_program(value):
+                    self._retune_running_target_if_needed_locked(tuner_idx, state)
             elif field == "target":
                 if value and value != "none" and not state.get("channel_id") and self._looks_like_atsc_scan_probe(state.get("channel", ""), [int(n) for n in re.findall(r"\d+", state.get("channel", ""))]):
                     state["channel_id"], state["rf"] = self._virtual_rf_for_current_tune(state.get("channel", ""))
@@ -707,14 +714,51 @@ class DiscoveryServer:
                 if self._filter_requests_playback_pids(state):
                     self._stop_psip_sender_locked(state)
                 self._refresh_tuner_status(tuner_idx)
-                if state.get("target") not in (None, "", "none") and not state.get("process"):
-                    self._set_tuner_target_locked(tuner_idx, state.get("target"))
+                if self._filter_looks_specific(state.get("filter")):
+                    self._retune_running_target_if_needed_locked(tuner_idx, state)
             elif field == "lockkey":
                 if value == "force":
                     state["lockkey"] = "none"
                 else:
                     state["lockkey"] = value or "none"
             return state.get(field, "none")
+
+    def _retune_running_target_if_needed_locked(self, tuner_idx: int, state: Dict):
+        target = state.get("target")
+        if target in (None, "", "none"):
+            return
+
+        pid_channel_id, pid_rf = self._select_channel_for_filter_pids(state)
+        if state.get("process") and not pid_channel_id and not self._program_requests_specific_program(state.get("program")):
+            return
+        if pid_channel_id and pid_rf:
+            desired_channel_id = pid_channel_id
+            desired_rf = pid_rf
+        else:
+            desired_channel_id = state.get("channel_id")
+            desired_rf = state.get("rf")
+
+        if not desired_channel_id or not desired_rf:
+            if not state.get("process"):
+                self._set_tuner_target_locked(tuner_idx, target)
+            return
+
+        desired_key = self._rf_stream_key(desired_rf)
+        current_key = state.get("stream_rf_key") or (0, 0)
+        if state.get("process") and desired_key != current_key:
+            state["channel_id"] = desired_channel_id
+            state["rf"] = desired_rf
+            logger.info(
+                "Retuning tuner%s from %s to %s based on updated program/filter selection",
+                tuner_idx,
+                current_key,
+                desired_key,
+            )
+            self._set_tuner_target_locked(tuner_idx, target)
+            return
+
+        if not state.get("process"):
+            self._set_tuner_target_locked(tuner_idx, target)
 
     def _select_channel_id(self, hint: str) -> Optional[str]:
         if not self.channel_map:
@@ -846,6 +890,12 @@ class DiscoveryServer:
             ):
                 return rf["channel_id"], rf
         return current_rf["channel_id"], current_rf
+
+    def _program_requests_specific_program(self, value: object) -> bool:
+        try:
+            return int(str(value or "").strip()) > 0
+        except (TypeError, ValueError):
+            return False
 
     def _virtual_rf_for_current_tune(self, hint: str) -> Tuple[Optional[str], Optional[Dict]]:
         if not self._rf_channels:
@@ -1137,10 +1187,8 @@ class DiscoveryServer:
         state["stream_stop"] = stream_stop
         state["stream_thread"] = stream_thread
         state["temp_source_path"] = temp_source_path
-        if self._filter_requests_playback_pids(state):
-            self._stop_psip_sender_locked(state)
-        else:
-            self._start_psip_sender_locked(state, stream_target)
+        state["stream_announced"] = False
+        self._start_psip_sender_locked(state, stream_target)
         logger.info("Streaming channel %s to HDHR target %s (ffmpeg log: %s)", channel_id, target, log_path)
 
     def _prepare_ffmpeg_input_source(self, source_url: str) -> Tuple[str, Optional[str]]:
@@ -1157,6 +1205,11 @@ class DiscoveryServer:
             return None
         if not self._needs_pluto_headers(source_url):
             return None
+        now = time.monotonic()
+        cached = self._prepared_input_cache.get(source_url)
+        if cached and cached[1] > now and os.path.exists(cached[0]):
+            logger.info("Reusing cached local Pluto HLS master for playback: %s", cached[0])
+            return cached[0]
 
         try:
             headers = {
@@ -1204,6 +1257,7 @@ class DiscoveryServer:
         os.close(fd)
         with open(path, "w", encoding="utf-8", newline="\n") as f:
             f.write("\n".join(lines))
+        self._prepared_input_cache[source_url] = (path, now + 45)
         logger.info("Using local Pluto HLS master for playback: %s", path)
         return path
 
@@ -1259,6 +1313,12 @@ class DiscoveryServer:
         audio_pid = int(rf.get("audio_pid") or 0x51)
         requested = self._literal_filter_pids(state.get("filter"))
         return video_pid in requested or audio_pid in requested
+
+    def _filter_looks_specific(self, filter_value: object) -> bool:
+        text = str(filter_value or "").strip().lower()
+        if not text or text in ("none", "bypass", "r"):
+            return False
+        return "0x" in text
 
     def _filter_match_candidates(self, state: Dict) -> Tuple[List[Dict], List[Dict], int]:
         requested = self._requested_filter_pids(state.get("filter"))
@@ -1362,20 +1422,24 @@ class DiscoveryServer:
 
         temp_source_path = state.get("temp_source_path")
         state["temp_source_path"] = None
+        state["stream_announced"] = False
 
         proc = state.get("process")
         state["process"] = None
         stream_stop = state.get("stream_stop")
         state["stream_stop"] = None
+        stream_thread = state.get("stream_thread")
         state["stream_thread"] = None
         if stream_stop:
             stream_stop.set()
         log_file = state.get("log_file")
         state["log_file"] = None
         if not proc or proc.poll() is not None:
+            if stream_thread:
+                stream_thread.join(timeout=1.0)
             if log_file:
                 log_file.close()
-            if temp_source_path and os.path.exists(temp_source_path):
+            if temp_source_path and os.path.exists(temp_source_path) and not self._is_cached_prepared_input(temp_source_path):
                 try:
                     os.unlink(temp_source_path)
                 except OSError:
@@ -1386,13 +1450,37 @@ class DiscoveryServer:
             proc.wait(timeout=2)
         except subprocess.TimeoutExpired:
             proc.kill()
+            try:
+                proc.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
+        if stream_thread:
+            stream_thread.join(timeout=1.5)
         if log_file:
             log_file.close()
-        if temp_source_path and os.path.exists(temp_source_path):
+        if temp_source_path and os.path.exists(temp_source_path) and not self._is_cached_prepared_input(temp_source_path):
             try:
                 os.unlink(temp_source_path)
             except OSError:
                 pass
+
+    def _is_cached_prepared_input(self, path: str) -> bool:
+        now = time.monotonic()
+        expired = []
+        for key, (cached_path, expires_at) in self._prepared_input_cache.items():
+            if expires_at <= now or not os.path.exists(cached_path):
+                expired.append(key)
+                continue
+            if os.path.normcase(os.path.abspath(cached_path)) == os.path.normcase(os.path.abspath(path)):
+                return True
+        for key in expired:
+            cached_path = self._prepared_input_cache.pop(key, (None, 0))[0]
+            if cached_path and os.path.exists(cached_path):
+                try:
+                    os.unlink(cached_path)
+                except OSError:
+                    pass
+        return False
 
     def _target_to_udp_addr(self, target: str) -> Optional[Tuple[str, int]]:
         parsed = urllib.parse.urlparse(target or "")
@@ -1419,7 +1507,8 @@ class DiscoveryServer:
         packet_size = 1316
         packets_per_burst = 8
         burst_size = packet_size * packets_per_burst
-        buffer_target_bytes = transport_bps // 4
+        # Keep the startup buffer modest so WMC sees bytes quickly on retunes.
+        buffer_target_bytes = min(max(burst_size * 2, transport_bps // 32), burst_size * 8)
         buffer_max_bursts = max(128, (transport_bps * 2) // 8 // burst_size)
         burst_queue: "queue.Queue[Optional[bytes]]" = queue.Queue(maxsize=buffer_max_bursts)
         bytes_sent = 0
@@ -1461,7 +1550,7 @@ class DiscoveryServer:
 
             prebuffered: List[bytes] = []
             buffered_bytes = 0
-            prebuffer_deadline = time.monotonic() + 2.0
+            prebuffer_deadline = time.monotonic() + 0.20
             while not stop_event.is_set() and buffered_bytes < buffer_target_bytes and time.monotonic() < prebuffer_deadline:
                 try:
                     burst = burst_queue.get(timeout=0.1)
@@ -1504,6 +1593,8 @@ class DiscoveryServer:
                         sock.sendto(datagram, addr)
                         bytes_sent += len(datagram)
                         burst_sent += len(chunk)
+                        if burst_sent > 0:
+                            self._notify_stream_bytes(tuner_idx)
                         if use_rtp:
                             rtp_sequence = (rtp_sequence + 1) & 0xFFFF
                             ticks = max(1, int((len(chunk) * 8 * 90000) / max(transport_bps, 1)))
@@ -1533,6 +1624,14 @@ class DiscoveryServer:
             except Exception:
                 pass
             logger.info("UDP bridge stopped for tuner%s after %.1fs (%d bytes)", tuner_idx, elapsed, bytes_sent)
+
+    def _notify_stream_bytes(self, tuner_idx: int):
+        with self._state_lock:
+            state = self._tuner_state.get(tuner_idx)
+            if not state or state.get("stream_announced"):
+                return
+            state["stream_announced"] = True
+            self._stop_psip_sender_locked(state)
 
     def _normalize_stream_target(self, target: str) -> Optional[str]:
         value = (target or "").strip()
@@ -1813,7 +1912,7 @@ class DiscoveryServer:
             "-map", "0:a:0?",
             "-dn",
             "-sn",
-        ] + self._video_encoder_args(effective_bitrate) + [
+        ] + self._video_encoder_args(effective_bitrate, self._uses_hls_quality_profile(source_url)) + [
             "-c:a", "ac3",
             "-b:a", "192k",
             "-ar", "48000",
@@ -1830,16 +1929,21 @@ class DiscoveryServer:
             "-metadata", "service_provider=VirtualHDHR",
             "-metadata", f"service_name={service_name}",
             "-muxrate", str(transport_bps),
+            "-muxpreload", "0",
+            "-muxdelay", "0",
+            "-flush_packets", "1",
             "-pat_period", "0.10",
             "pipe:1",
         ]
 
-    def _video_encoder_args(self, effective_bitrate: str) -> List[str]:
+    def _video_encoder_args(self, effective_bitrate: str, use_hls_profile: bool = False) -> List[str]:
         codec = (self.output_codec or "mpeg2video").lower()
+        vista_mode = bool(getattr(self, "force_vista_mode", False))
+        frame_size = "720x480" if vista_mode else "1280x720"
         common = [
             "-pix_fmt", "yuv420p",
             "-r", "30000/1001",
-            "-s", "1280x720",
+            "-s", frame_size,
             "-aspect", "16:9",
             "-b:v", effective_bitrate,
             "-g", "15",
@@ -1853,11 +1957,24 @@ class DiscoveryServer:
                 "-profile:v", "high",
                 "-level:v", "4.0",
             ] + common
-        return [
+        args = [
             "-c:v", "mpeg2video",
             "-profile:v", "main",
-            "-level:v", "high",
+            "-level:v", "main",
         ] + common
+        if vista_mode:
+            args.extend([
+                "-q:v", "3",
+                "-intra_vlc", "1",
+                "-non_linear_quant", "1",
+            ])
+        if use_hls_profile:
+            args.extend([
+                "-qmin", "2",
+                "-qmax", "12",
+                "-sc_threshold", "0",
+            ])
+        return args
 
     def _is_network_media_source(self, source_url: str) -> bool:
         return urllib.parse.urlparse(source_url or "").scheme.lower() in ("http", "https")

@@ -99,8 +99,15 @@ def _should_keep_original_hls_url(source_url: str, playback_url: str) -> bool:
     return False
 
 
-def video_encoder_args(output_codec: str, bitrate: str):
+def video_encoder_args(output_codec: str, bitrate: str, use_hls_profile: bool = False, vista_mode: bool = False):
     codec = (output_codec or "mpeg2video").lower()
+    frame_size = "720x480" if vista_mode else "1280x720"
+    base_args = [
+        "-pix_fmt", "yuv420p",
+        "-r", "30000/1001",
+        "-s", frame_size,
+        "-aspect", "16:9",
+    ]
     if codec in ("h264", "libx264", "mpeg4_h264", "mpeg4-avc", "avc"):
         return [
             "-c:v", "libx264",
@@ -113,24 +120,29 @@ def video_encoder_args(output_codec: str, bitrate: str):
             "-bufsize:v", str(int(bitrate.rstrip("k")) * 2) + "k",
             "-g", "15",
             "-bf", "0",
-            "-pix_fmt", "yuv420p",
-            "-r", "30000/1001",
-            "-s", "1280x720",
-            "-aspect", "16:9",
-        ]
+        ] + base_args
     # mpeg2video — avoid VBV constraints that cause "impossible bitrate constraints" error
-    return [
+    args = [
         "-c:v", "mpeg2video",
         "-profile:v", "main",
         "-level:v", "main",
         "-b:v", bitrate,
         "-g", "15",
         "-bf", "0",
-        "-pix_fmt", "yuv420p",
-        "-r", "30000/1001",
-        "-s", "1280x720",
-        "-aspect", "16:9",
-    ]
+    ] + base_args
+    if vista_mode:
+        args.extend([
+            "-q:v", "3",
+            "-intra_vlc", "1",
+            "-non_linear_quant", "1",
+        ])
+    if use_hls_profile:
+        args.extend([
+            "-qmin", "2",
+            "-qmax", "12",
+            "-sc_threshold", "0",
+        ])
+    return args
 
 
 def ffmpeg_available(ffmpeg_path: str = "ffmpeg") -> bool:
@@ -176,9 +188,11 @@ def ffmpeg_transcode_stream(
     audio_codec: str = "ac3",
     bitrate: str = "4000k",
     output_format: str = "mpegts",
+    vista_mode: bool = False,
 ):
     source_url = _resolve_hls_source_url(source_url)
-    effective_bitrate = _hls_profile_bitrate(bitrate) if _is_hls_like_source(source_url) else bitrate
+    use_hls_profile = _is_hls_like_source(source_url)
+    effective_bitrate = _hls_profile_bitrate(bitrate) if use_hls_profile else bitrate
     cmd = [
         ffmpeg_path,
         "-hide_banner",
@@ -208,7 +222,7 @@ def ffmpeg_transcode_stream(
         "-dn",
         "-sn",
     ])
-    cmd += video_encoder_args(output_codec, effective_bitrate) + [
+    cmd += video_encoder_args(output_codec, effective_bitrate, use_hls_profile=use_hls_profile, vista_mode=vista_mode) + [
         "-c:a", audio_codec,
         "-b:a", "192k",
         "-ar", "48000",
@@ -222,6 +236,9 @@ def ffmpeg_transcode_stream(
         "-metadata", "service_provider=VirtualHDHR",
         "-metadata", "service_name=VirtualHDHR",
         "-muxrate", "19392658",
+        "-muxpreload", "0",
+        "-muxdelay", "0",
+        "-flush_packets", "1",
         "-pat_period", "0.10",
         "pipe:1",
     ]
@@ -280,6 +297,7 @@ class StreamSession:
         output_codec: str = "mpeg2video",
         audio_codec: str = "ac3",
         bitrate: str = "4000k",
+        vista_mode: bool = False,
     ):
         self.channel_id = channel_id
         self.channel_map = channel_map
@@ -288,6 +306,7 @@ class StreamSession:
         self.output_codec = output_codec
         self.audio_codec = audio_codec
         self.bitrate = bitrate
+        self.vista_mode = vista_mode
         self._generator = None
 
     def stream(self):
@@ -305,4 +324,5 @@ class StreamSession:
             output_codec=self.output_codec,
             audio_codec=self.audio_codec,
             bitrate=self.bitrate,
+            vista_mode=self.vista_mode,
         )

@@ -25,18 +25,40 @@ from hdhr_proxy.config import Config
 from hdhr_proxy.m3u_parser import M3UParser, build_lineup
 from hdhr_proxy.discovery import DiscoveryServer, normalize_device_id
 from hdhr_proxy.http_server import HDHRHTTPServer
+from hdhr_proxy.guide_match import build_guide_match_rows, filter_lineup_to_matched_channels, write_guide_match_utility
 from hdhr_proxy.mxf import write_mxf, import_mxf
 from hdhr_proxy.xmltv import load_xmltv
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%H:%M:%S",
-)
 logger = logging.getLogger("main")
 
 
-def wmc_video_codec_for_current_os() -> str:
+def configure_logging(log_dir: str = "."):
+    root = logging.getLogger()
+    if root.handlers:
+        return
+    formatter = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    root.setLevel(logging.INFO)
+
+    console = logging.StreamHandler()
+    console.setFormatter(formatter)
+    root.addHandler(console)
+
+    try:
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, "hdhr_proxy_main.log")
+        file_handler = logging.FileHandler(log_path, encoding="utf-8")
+        file_handler.setFormatter(formatter)
+        root.addHandler(file_handler)
+    except OSError:
+        pass
+
+
+def wmc_video_codec_for_current_os(force_vista: bool = False) -> str:
+    if force_vista:
+        return "mpeg2video"
     if platform.system() != "Windows":
         return "mpeg2video"
 
@@ -47,13 +69,15 @@ def wmc_video_codec_for_current_os() -> str:
 
 
 def apply_wmc_video_codec_policy(cfg: Config):
-    codec = wmc_video_codec_for_current_os()
+    codec = wmc_video_codec_for_current_os(force_vista=bool(getattr(cfg, "force_vista_mode", False)))
     if cfg.ffmpeg_output_codec != codec:
         logger.info(
             "Using %s video for Windows Media Center on this OS (was configured as %s).",
             "H.264/MPEG-4 AVC" if codec == "libx264" else "MPEG-2",
             cfg.ffmpeg_output_codec,
         )
+    if getattr(cfg, "force_vista_mode", False):
+        logger.info("Vista compatibility override enabled: forcing Vista WMC MPEG-2 profile for testing.")
     cfg.ffmpeg_output_codec = codec
 
 
@@ -262,12 +286,33 @@ def run_proxy(cfg: Config):
         tuner_count=cfg.tuner_count,
     )
     xmltv_data = load_xmltv(cfg.xmltv_file, cfg.xmltv_url, channel_map)
+    generated_mxf_path = None
     if xmltv_data:
         logger.info("Loaded XMLTV guide from %s", xmltv_data.source)
         if cfg.write_mxf or cfg.import_mxf:
             mxf_path = write_mxf(xmltv_data.filtered_xml, lineup, channel_map, cfg.mxf_file)
+            generated_mxf_path = mxf_path
             if cfg.import_mxf:
                 import_mxf(mxf_path)
+        elif cfg.mxf_file and os.path.exists(cfg.mxf_file):
+            generated_mxf_path = os.path.abspath(cfg.mxf_file)
+        guide_rows = build_guide_match_rows(
+            lineup,
+            channel_map,
+            xmltv_data.filtered_xml,
+            mxf_path=generated_mxf_path,
+        )
+        guide_match_csv, guide_only_mapping, match_count = write_guide_match_utility(
+            lineup,
+            channel_map,
+            xmltv_data.filtered_xml,
+            mxf_path=generated_mxf_path,
+        )
+        logger.info("Wrote WMC guide match utility (%s matched channels): %s", match_count, guide_match_csv)
+        logger.info("Wrote WMC guide-only mapping list: %s", guide_only_mapping)
+        if cfg.guide_only_lineup:
+            lineup, channel_map = filter_lineup_to_matched_channels(lineup, channel_map, guide_rows)
+            logger.info("Guide-only lineup mode enabled: advertising %s matched channels to WMC scan", len(lineup))
     elif cfg.write_mxf or cfg.import_mxf:
         logger.error("MXF generation/import requires --xmltv-file or --xmltv-url.")
         sys.exit(1)
@@ -311,6 +356,7 @@ def run_proxy(cfg: Config):
         output_codec=cfg.ffmpeg_output_codec,
         audio_codec=cfg.ffmpeg_audio_codec,
         bitrate=cfg.ffmpeg_bitrate,
+        force_vista_mode=bool(getattr(cfg, "force_vista_mode", False)),
     )
     discovery.start()
 
@@ -337,6 +383,9 @@ def run_proxy(cfg: Config):
 
 
 def main():
+    log_dir = os.path.dirname(os.path.abspath(sys.argv[0])) or "."
+    configure_logging(log_dir)
+    logger.info("App log path: %s", os.path.join(log_dir, "hdhr_proxy_main.log"))
     parser = argparse.ArgumentParser(
         description="Virtual HDHomerun Proxy Server",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -360,6 +409,7 @@ Examples:
     parser.add_argument("--mxf-file", default="guide.mxf", help="Output Windows Media Center MXF guide path")
     parser.add_argument("--write-mxf", action="store_true", help="Generate a Windows Media Center MXF guide file")
     parser.add_argument("--import-mxf", action="store_true", help="Generate and import the MXF guide into Windows Media Center")
+    parser.add_argument("--guide-only-lineup", action="store_true", help="Only advertise channels that matched XMLTV/MXF guide data")
     parser.add_argument(
         "--hls-base-url",
         help="Original web URL for a saved HLS master playlist that uses relative variant/segment URLs",
@@ -381,6 +431,7 @@ Examples:
     parser.add_argument("--output-codec", default="mpeg2video", help="ffmpeg output video codec")
     parser.add_argument("--audio-codec", default="ac3", help="ffmpeg output audio codec")
     parser.add_argument("--bitrate", default="4000k", help="ffmpeg output bitrate")
+    parser.add_argument("--vista", action="store_true", help="Force Vista-specific WMC codec behavior for client testing")
 
     # Windows service commands
     parser.add_argument(
@@ -412,6 +463,8 @@ Examples:
         cfg.write_mxf = True
     if args.import_mxf:
         cfg.import_mxf = True
+    if args.guide_only_lineup:
+        cfg.guide_only_lineup = True
     if args.port:
         cfg.http_port = args.port
     if args.listen_ip:
@@ -435,6 +488,8 @@ Examples:
         cfg.ffmpeg_audio_codec = args.audio_codec
     if args.bitrate:
         cfg.ffmpeg_bitrate = args.bitrate
+    if args.vista:
+        cfg.force_vista_mode = True
 
     # Windows service commands
     if args.command:

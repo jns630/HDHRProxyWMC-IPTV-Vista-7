@@ -283,11 +283,12 @@ def build_lineup(
     lineup = []
     ch_map: Dict[str, M3UChannel] = {}
     mapping = channel_mapping or {}
+    programs_per_physical = _programs_per_physical_for_lineup_size(len(channels))
 
     for i, ch in enumerate(channels, start=1):
-        physical_channel = _physical_channel_for_index(i)
-        program_number = _program_number_for_index(i)
-        virtual_minor = _virtual_minor_for_index(i)
+        physical_channel = _physical_channel_for_index(i, programs_per_physical)
+        program_number = _program_number_for_index(i, programs_per_physical)
+        virtual_minor = _virtual_minor_for_index(i, programs_per_physical)
         guide_number = ch.tvg_chno or mapping.get(ch.name, "") or f"{physical_channel}.{virtual_minor}"
         frequency = _us_bcast_frequency_for_physical_channel(physical_channel)
         low_freq = frequency - 3000000
@@ -325,19 +326,29 @@ def build_lineup(
     return lineup, ch_map
 
 
-def _physical_channel_for_index(index: int) -> int:
+def _programs_per_physical_for_lineup_size(channel_count: int) -> int:
     physical_count = US_BCAST_LAST_PHYSICAL_CHANNEL - US_BCAST_FIRST_PHYSICAL_CHANNEL + 1
-    slot = (max(index, 1) - 1) // VIRTUAL_PROGRAMS_PER_PHYSICAL_CHANNEL
+    if channel_count <= 0:
+        return 1
+    # Spread medium lineups across more RFs so WMC, especially Vista, sees fewer
+    # subchannels per frequency during scan. Keep the 16-program ceiling so very
+    # large lineups still fit inside the 2-69 ATSC range.
+    return max(1, min(VIRTUAL_PROGRAMS_PER_PHYSICAL_CHANNEL, (channel_count + physical_count - 1) // physical_count))
+
+
+def _physical_channel_for_index(index: int, programs_per_physical: int = VIRTUAL_PROGRAMS_PER_PHYSICAL_CHANNEL) -> int:
+    physical_count = US_BCAST_LAST_PHYSICAL_CHANNEL - US_BCAST_FIRST_PHYSICAL_CHANNEL + 1
+    slot = (max(index, 1) - 1) // max(1, programs_per_physical)
     return US_BCAST_FIRST_PHYSICAL_CHANNEL + (slot % physical_count)
 
 
-def _program_number_for_index(index: int) -> int:
-    slot = (max(index, 1) - 1) % VIRTUAL_PROGRAMS_PER_PHYSICAL_CHANNEL
+def _program_number_for_index(index: int, programs_per_physical: int = VIRTUAL_PROGRAMS_PER_PHYSICAL_CHANNEL) -> int:
+    slot = (max(index, 1) - 1) % max(1, programs_per_physical)
     return VIRTUAL_FIRST_PROGRAM_NUMBER + slot
 
 
-def _virtual_minor_for_index(index: int) -> int:
-    return ((max(index, 1) - 1) % VIRTUAL_PROGRAMS_PER_PHYSICAL_CHANNEL) + 1
+def _virtual_minor_for_index(index: int, programs_per_physical: int = VIRTUAL_PROGRAMS_PER_PHYSICAL_CHANNEL) -> int:
+    return ((max(index, 1) - 1) % max(1, programs_per_physical)) + 1
 
 
 def _us_bcast_frequency_for_physical_channel(physical: int) -> int:

@@ -61,6 +61,7 @@ The current build includes a few practical WMC-focused fixes:
 
 - Vista uses MPEG-2 video for WMC compatibility.
 - Windows 7 and newer use H.264 / MPEG-4 AVC for WMC playback.
+- Use `--vista` to force the Vista MPEG-2 WMC profile on newer systems for client testing.
 - HLS master playlists are resolved to a concrete media playlist before ffmpeg starts.
 - PMT and A/V PID requests are used to choose the correct virtual channel during WMC playback.
 - Broad PMT-only filter requests are deferred until WMC provides enough information to identify the intended program.
@@ -290,6 +291,40 @@ C:\Windows\ehome\loadmxf.exe -v -i guide.mxf
 
 On this machine I verified that `loadmxf.exe` accepts the generated MXF structure in a test store.
 
+### WMC guide match utility
+
+Whenever XMLTV is loaded, the proxy now also writes two helper files for Windows Media Center channel attachment:
+
+- `HDHRProxyWMC_GuideMatch.generated.csv`
+- `HDHRProxyWMC_GuideOnly.generated.ini`
+
+What they do:
+
+- The CSV shows the current lineup channel, guide number, call sign, matched XMLTV id, and listing count.
+- The guide-only INI contains just the channels that actually matched guide data.
+
+This is meant for the WMC flow after scanning:
+
+1. Scan the virtual tuner channels.
+2. Use the generated CSV as your attach-listings reference.
+3. If you want only channels that exist in the guide, use `HDHRProxyWMC_GuideOnly.generated.ini` as the filtered mapping reference.
+
+### Guide-only WMC scan mode
+
+If you want WMC to scan only channels that actually matched the guide, start the proxy with:
+
+```powershell
+python main.py --m3u-file "us_pluto.m3u" --xmltv-url "https://i.mjh.nz/PlutoTV/us.xml" --guide-only-lineup
+```
+
+Or with the EXE:
+
+```powershell
+.\dist\HDHRProxyWMC-IPTV.exe --m3u-file "us_pluto.m3u" --xmltv-url "https://i.mjh.nz/PlutoTV/us.xml" --guide-only-lineup
+```
+
+In this mode, the proxy only advertises channels that matched XMLTV/MXF guide data, so the WMC scan result is already limited to guide-backed channels.
+
 A normal IPTV playlist looks like this:
 
 ```m3u
@@ -437,6 +472,12 @@ ffmpeg is used to turn a wide range of IPTV/HLS sources into a WMC-friendly MPEG
 - Windows 7 or newer / Windows version `6.1+`: H.264/MPEG-4 AVC video (`libx264`)
 - AC-3 stereo audio
 - 1280x720 output
+
+For Vista-specific client testing on a newer machine, you can force the Vista WMC profile:
+
+```powershell
+python main.py --m3u-file "us_pluto.m3u" --vista
+```
 - 29.97 fps
 - MPEG-TS container
 - Repeated headers/PAT/PMT data
