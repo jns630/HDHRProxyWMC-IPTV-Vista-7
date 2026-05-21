@@ -12,6 +12,7 @@ US_BCAST_LAST_PHYSICAL_CHANNEL = 69
 VIRTUAL_PROGRAMS_PER_PHYSICAL_CHANNEL = 16
 VIRTUAL_FIRST_PROGRAM_NUMBER = 3
 MPEGTS_DYNAMIC_PID_BASE = 0x30
+HLS_REDIRECTED_URL_MAX_LENGTH = 1024
 
 
 class M3UChannel:
@@ -172,9 +173,13 @@ class M3UParser:
         if parsed_source.scheme in ("http", "https"):
             selected = cls._select_hls_variant(variants)
             if selected:
-                channel.url = urllib.parse.urljoin(source, selected)
-                channel.ext["hls_playback_url"] = channel.url
-                logger.info("Using HLS variant for playback: %s", channel.url)
+                playback_url = urllib.parse.urljoin(source, selected)
+                # Keep the canonical channel URL stable for remote HLS sources. Some
+                # providers (notably Pluto partner mirrors) redirect the initial master
+                # to very long signed variant URLs that expire quickly and can fail in
+                # ffmpeg/WMC when we bake them into the lineup too early.
+                channel.ext["hls_playback_url"] = cls._stable_remote_hls_url(source, playback_url)
+                logger.info("Using remote HLS playback hint: %s", channel.ext["hls_playback_url"])
             else:
                 channel.ext["hls_playback_url"] = source
             return channel
@@ -207,6 +212,18 @@ class M3UParser:
                 ", ".join(missing),
             )
         return channel
+
+    @staticmethod
+    def _stable_remote_hls_url(source: str, playback_url: str) -> str:
+        if not playback_url:
+            return source
+        source_host = urllib.parse.urlparse(source).netloc.lower()
+        playback_parts = urllib.parse.urlparse(playback_url)
+        if len(playback_url) > HLS_REDIRECTED_URL_MAX_LENGTH:
+            return source
+        if "jmp2.uk" in source_host and playback_parts.query:
+            return source
+        return playback_url
 
     @staticmethod
     def _hls_variant_uris(raw: str) -> List[Tuple[str, Dict[str, str]]]:

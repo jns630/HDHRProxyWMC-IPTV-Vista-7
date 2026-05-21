@@ -24,7 +24,7 @@ FFMPEG_INPUT_OPTIONS = [
 
 def _needs_pluto_headers(source_url: str) -> bool:
     host = urllib.parse.urlparse(source_url or "").netloc.lower()
-    return "pluto.tv" in host
+    return "pluto.tv" in host or "jmp2.uk" in host
 
 
 def _resolve_hls_source_url(source_url: str) -> str:
@@ -53,7 +53,22 @@ def _resolve_hls_source_url(source_url: str) -> str:
     selected = M3UParser._select_hls_variant(variants)
     if not selected:
         return source_url
-    return urllib.parse.urljoin(source_url, selected)
+    playback_url = urllib.parse.urljoin(source_url, selected)
+    if _should_keep_original_hls_url(source_url, playback_url):
+        return source_url
+    return playback_url
+
+
+def _should_keep_original_hls_url(source_url: str, playback_url: str) -> bool:
+    if not playback_url:
+        return True
+    source_host = urllib.parse.urlparse(source_url or "").netloc.lower()
+    playback_parts = urllib.parse.urlparse(playback_url)
+    if len(playback_url) > 1024:
+        return True
+    if "jmp2.uk" in source_host and playback_parts.query:
+        return True
+    return False
 
 
 def video_encoder_args(output_codec: str, bitrate: str):

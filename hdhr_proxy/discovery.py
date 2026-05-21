@@ -1116,6 +1116,8 @@ class DiscoveryServer:
             return source_url
 
         playback_url = urllib.parse.urljoin(source_url, selected)
+        if self._should_keep_original_hls_url(source_url, playback_url):
+            return source_url
         self._hls_variant_cache[source_url] = (playback_url, now + 300)
         logger.info("Using HLS media variant for playback: %s", playback_url)
         return playback_url
@@ -1713,7 +1715,20 @@ class DiscoveryServer:
 
     def _needs_pluto_headers(self, source_url: str) -> bool:
         host = urllib.parse.urlparse(source_url or "").netloc.lower()
-        return "pluto.tv" in host
+        return "pluto.tv" in host or "jmp2.uk" in host
+
+    def _should_keep_original_hls_url(self, source_url: str, playback_url: str) -> bool:
+        if not playback_url:
+            return True
+        source_host = urllib.parse.urlparse(source_url or "").netloc.lower()
+        playback_parts = urllib.parse.urlparse(playback_url)
+        if len(playback_url) > 1024:
+            logger.info("Keeping original HLS URL because resolved variant is too long")
+            return True
+        if "jmp2.uk" in source_host and playback_parts.query:
+            logger.info("Keeping original Pluto-style HLS URL instead of signed variant")
+            return True
+        return False
 
     def _looks_like_local_hls(self, source_url: str) -> bool:
         parsed = urllib.parse.urlparse(source_url or "")
