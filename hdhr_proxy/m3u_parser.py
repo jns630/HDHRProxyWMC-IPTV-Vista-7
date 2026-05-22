@@ -13,6 +13,7 @@ VIRTUAL_PROGRAMS_PER_PHYSICAL_CHANNEL = 16
 VIRTUAL_FIRST_PROGRAM_NUMBER = 3
 MPEGTS_DYNAMIC_PID_BASE = 0x30
 HLS_REDIRECTED_URL_MAX_LENGTH = 1024
+ADAPTIVE_PROGRAMS_PER_PHYSICAL_OPTIONS = (1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 16)
 
 
 class M3UChannel:
@@ -284,6 +285,13 @@ def build_lineup(
     ch_map: Dict[str, M3UChannel] = {}
     mapping = channel_mapping or {}
     programs_per_physical = _programs_per_physical_for_lineup_size(len(channels))
+    physicals_used = _physical_channels_used_for_lineup_size(len(channels), programs_per_physical)
+    logger.info(
+        "Adaptive virtual RF layout: %s parsed channels -> %s programs/RF across %s physical channels",
+        len(channels),
+        programs_per_physical,
+        physicals_used,
+    )
 
     for i, ch in enumerate(channels, start=1):
         physical_channel = _physical_channel_for_index(i, programs_per_physical)
@@ -330,10 +338,21 @@ def _programs_per_physical_for_lineup_size(channel_count: int) -> int:
     physical_count = US_BCAST_LAST_PHYSICAL_CHANNEL - US_BCAST_FIRST_PHYSICAL_CHANNEL + 1
     if channel_count <= 0:
         return 1
-    # Spread medium lineups across more RFs so WMC, especially Vista, sees fewer
-    # subchannels per frequency during scan. Keep the 16-program ceiling so very
-    # large lineups still fit inside the 2-69 ATSC range.
-    return max(1, min(VIRTUAL_PROGRAMS_PER_PHYSICAL_CHANNEL, (channel_count + physical_count - 1) // physical_count))
+    # Pick from a conservative set of RF packing profiles rather than letting the
+    # lineup land on arbitrary densities like 9 or 11 subchannels per RF. WMC scan
+    # behavior is more predictable when the virtual RF groups stay in friendlier
+    # bucket sizes and spread across the broadcast range as much as possible.
+    for programs_per_physical in ADAPTIVE_PROGRAMS_PER_PHYSICAL_OPTIONS:
+        needed_physicals = (channel_count + programs_per_physical - 1) // programs_per_physical
+        if needed_physicals <= physical_count:
+            return programs_per_physical
+    return VIRTUAL_PROGRAMS_PER_PHYSICAL_CHANNEL
+
+
+def _physical_channels_used_for_lineup_size(channel_count: int, programs_per_physical: int) -> int:
+    if channel_count <= 0:
+        return 1
+    return (channel_count + max(1, programs_per_physical) - 1) // max(1, programs_per_physical)
 
 
 def _physical_channel_for_index(index: int, programs_per_physical: int = VIRTUAL_PROGRAMS_PER_PHYSICAL_CHANNEL) -> int:
