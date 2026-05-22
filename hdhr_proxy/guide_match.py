@@ -84,7 +84,7 @@ def build_guide_match_rows(
             continue
 
         guide_name = str(item.get("GuideName") or getattr(channel, "name", guide_number)).strip()
-        call_sign = make_call_sign(guide_name)
+        call_sign = _lineup_call_sign(item, guide_name)
         xmltv_id = xmltv_ids.get(guide_number, "")
         program_count = xmltv_program_counts.get(xmltv_id, 0)
         mxf_meta = mxf_services.get(call_sign, {})
@@ -109,6 +109,13 @@ def build_guide_match_rows(
 
     rows.sort(key=lambda row: _guide_number_sort_key(row["GuideNumber"]))
     return rows
+
+
+def _lineup_call_sign(item: Dict, fallback_name: str) -> str:
+    explicit = str(item.get("ScannedCallSign") or item.get("CallSign") or "").strip()
+    if explicit:
+        return explicit
+    return make_call_sign(fallback_name)
 
 
 def write_guide_match_csv(rows: List[Dict[str, str]], path: str) -> str:

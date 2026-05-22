@@ -303,9 +303,11 @@ Whenever XMLTV is loaded, the proxy now also writes two helper files for Windows
 
 What they do:
 
-- The CSV shows the current lineup channel, guide number, call sign, matched XMLTV id, and listing count.
+- The CSV shows the current lineup channel, guide number, scanned ATSC call sign, matched XMLTV id, and listing count.
 - The guide-only INI contains just the channels that actually matched guide data.
-- The auto-match MXF is a filtered guide import file that uses the current lineup's channel numbers for WMC auto-attachment.
+- The auto-match MXF is a filtered guide import file that uses the current lineup's channel numbers and scanned ATSC call signs for WMC auto-attachment.
+
+The XMLTV channel names and ids can be different from the channel names WMC scanned from the virtual ATSC tuner. The proxy now keeps those separate: XMLTV ids are used only to choose the right programme listings, while the MXF service `callSign` is copied from the scanned virtual ATSC call sign that WMC already knows. This avoids attaching the right listings to the wrong scanned channel when the guide provider uses different call signs.
 
 This is meant for the WMC flow after scanning. The order matters because WMC has to create its scanned tuner lineup before the guide mapper can attach listings to it:
 

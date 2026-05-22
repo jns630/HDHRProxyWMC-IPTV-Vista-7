@@ -285,8 +285,11 @@ class DiscoveryServer:
                 "psip_stop": None,
                 "psip_thread": None,
                 "channel_id": None,
+                "source_url": None,
                 "temp_source_path": None,
                 "stream_announced": False,
+                "stream_restart_failures": 0,
+                "stream_restart_window_started_at": 0.0,
             }
             for i in range(max(0, tuner_count))
         }
@@ -809,7 +812,7 @@ class DiscoveryServer:
                 or original_video_pid != video_pid
                 or original_audio_pid != audio_pid
             ):
-                safe_name = self._safe_channel_name(item.get("GuideName") or getattr(channel, "name", f"CH{major}-{minor}"))
+                safe_name = self._scanned_call_sign(item, channel, f"CH{major}-{minor}")
                 program_table = (
                     f"[{program_number}:{pmt_pid}:{safe_name}:{program_pids}]"
                     f"[tsid=0x{physical_channel:04x}]"
@@ -822,7 +825,7 @@ class DiscoveryServer:
                 "high_freq": high_freq,
                 "major": major,
                 "minor": minor,
-                "name": self._safe_channel_name(item.get("GuideName") or getattr(channel, "name", f"CH{major}-{minor}")),
+                "name": self._scanned_call_sign(item, channel, f"CH{major}-{minor}"),
                 "program": program_number,
                 "pmt_pid": pmt_pid,
                 "video_pid": video_pid,
@@ -1074,12 +1077,21 @@ class DiscoveryServer:
         clean = re.sub(r"[^A-Za-z0-9_.+-]+", "-", name or "VirtualHD")
         return clean.strip("-")[:32] or "VirtualHD"
 
+    def _scanned_call_sign(self, item: Dict, channel, fallback: str) -> str:
+        explicit = str(item.get("ScannedCallSign") or item.get("CallSign") or "").strip()
+        if explicit:
+            return self._safe_channel_name(explicit)[:7]
+        return self._safe_channel_name(item.get("GuideName") or getattr(channel, "name", fallback))[:7]
+
     def _set_tuner_target_locked(self, tuner_idx: int, target: str):
         state = self._tuner_state[tuner_idx]
         if not target or target == "none":
             self._stop_tuner_process_locked(state)
             state["target"] = "none"
             state["target_norm"] = "none"
+            state["source_url"] = None
+            state["stream_restart_failures"] = 0
+            state["stream_restart_window_started_at"] = 0.0
             return
 
         stream_target = self._normalize_stream_target(target)
@@ -1141,6 +1153,7 @@ class DiscoveryServer:
         if not source_url:
             logger.warning("Channel %s has no source URL", channel_id)
             return
+        original_source_url = source_url
         source_url, temp_source_path = self._prepare_ffmpeg_input_source(source_url)
 
         missing_variants = getattr(channel, "ext", {}).get("hls_missing_variants") if channel else None
@@ -1189,6 +1202,7 @@ class DiscoveryServer:
         state["log_file"] = log_file
         state["stream_stop"] = stream_stop
         state["stream_thread"] = stream_thread
+        state["source_url"] = original_source_url
         state["temp_source_path"] = temp_source_path
         state["stream_announced"] = False
         self._start_psip_sender_locked(state, stream_target)
@@ -1238,8 +1252,7 @@ class DiscoveryServer:
             if uri == selected:
                 selected_attrs = attrs
                 break
-        audio_match = re.search(r'#EXT-X-MEDIA:TYPE=AUDIO[^\n]*URI="([^"]+)"', raw)
-        audio_url = urllib.parse.urljoin(base_url, audio_match.group(1)) if audio_match else None
+        audio_url = None
         video_url = urllib.parse.urljoin(base_url, selected)
         bandwidth = selected_attrs.get("average-bandwidth") or selected_attrs.get("bandwidth") or "3000000"
 
@@ -1260,7 +1273,7 @@ class DiscoveryServer:
         os.close(fd)
         with open(path, "w", encoding="utf-8", newline="\n") as f:
             f.write("\n".join(lines))
-        self._prepared_input_cache[source_url] = (path, now + 45)
+        self._prepared_input_cache[source_url] = (path, now + 6)
         logger.info("Using local Pluto HLS master for playback: %s", path)
         return path
 
@@ -1424,8 +1437,11 @@ class DiscoveryServer:
             psip_stop.set()
 
         temp_source_path = state.get("temp_source_path")
+        source_url = state.get("source_url")
         state["temp_source_path"] = None
+        state["source_url"] = None
         state["stream_announced"] = False
+        self._drop_prepared_input_cache_entry(source_url)
 
         proc = state.get("process")
         state["process"] = None
@@ -1484,6 +1500,16 @@ class DiscoveryServer:
                 except OSError:
                     pass
         return False
+
+    def _drop_prepared_input_cache_entry(self, source_url: Optional[str]):
+        if not source_url:
+            return
+        cached_path = self._prepared_input_cache.pop(source_url, (None, 0))[0]
+        if cached_path and os.path.exists(cached_path):
+            try:
+                os.unlink(cached_path)
+            except OSError:
+                pass
 
     def _target_to_udp_addr(self, target: str) -> Optional[Tuple[str, int]]:
         parsed = urllib.parse.urlparse(target or "")
@@ -1627,6 +1653,94 @@ class DiscoveryServer:
             except Exception:
                 pass
             logger.info("UDP bridge stopped for tuner%s after %.1fs (%d bytes)", tuner_idx, elapsed, bytes_sent)
+            self._handle_unexpected_stream_exit(tuner_idx, proc, stop_event, bytes_sent, elapsed)
+
+    def _handle_unexpected_stream_exit(
+        self,
+        tuner_idx: int,
+        proc: subprocess.Popen,
+        stop_event: threading.Event,
+        bytes_sent: int,
+        elapsed: float,
+    ):
+        restart_target = None
+        restart_delay = 0.0
+        with self._state_lock:
+            state = self._tuner_state.get(tuner_idx)
+            if not state or state.get("process") is not proc:
+                return
+            if stop_event.is_set() or str(state.get("target") or "").lower() == "none":
+                return
+
+            target = state.get("target")
+            log_file = state.get("log_file")
+            temp_source_path = state.get("temp_source_path")
+            source_url = state.get("source_url")
+            state["process"] = None
+            state["log_file"] = None
+            state["stream_stop"] = None
+            state["stream_thread"] = None
+            state["temp_source_path"] = None
+            state["source_url"] = None
+            state["stream_announced"] = False
+            self._drop_prepared_input_cache_entry(source_url)
+
+            if log_file:
+                try:
+                    log_file.close()
+                except Exception:
+                    pass
+            if temp_source_path and os.path.exists(temp_source_path) and not self._is_cached_prepared_input(temp_source_path):
+                try:
+                    os.unlink(temp_source_path)
+                except OSError:
+                    pass
+
+            now = time.monotonic()
+            window_started = float(state.get("stream_restart_window_started_at") or 0.0)
+            if not window_started or now - window_started > 60:
+                state["stream_restart_window_started_at"] = now
+                state["stream_restart_failures"] = 0
+
+            if bytes_sent >= 1024 * 1024 and elapsed >= 8.0:
+                state["stream_restart_failures"] = 0
+                restart_delay = 0.35
+            else:
+                failures = int(state.get("stream_restart_failures") or 0) + 1
+                state["stream_restart_failures"] = failures
+                if failures > 3:
+                    logger.warning(
+                        "Not restarting tuner%s stream after %d short failures in %.1fs",
+                        tuner_idx,
+                        failures,
+                        now - float(state.get("stream_restart_window_started_at") or now),
+                    )
+                    return
+                restart_delay = min(2.0, 0.35 * failures)
+
+            restart_target = target
+
+        if not restart_target:
+            return
+
+        logger.warning(
+            "Restarting tuner%s stream for active WMC target %s after ffmpeg ended (%.1fs, %d bytes)",
+            tuner_idx,
+            restart_target,
+            elapsed,
+            bytes_sent,
+        )
+        if restart_delay > 0:
+            time.sleep(restart_delay)
+        with self._state_lock:
+            state = self._tuner_state.get(tuner_idx)
+            if not state:
+                return
+            if str(state.get("target") or "").lower() != str(restart_target).lower():
+                return
+            if state.get("process") is not None:
+                return
+            self._set_tuner_target_locked(tuner_idx, restart_target)
 
     def _notify_stream_bytes(self, tuner_idx: int):
         with self._state_lock:
@@ -1634,6 +1748,8 @@ class DiscoveryServer:
             if not state or state.get("stream_announced"):
                 return
             state["stream_announced"] = True
+            state["stream_restart_failures"] = 0
+            state["stream_restart_window_started_at"] = 0.0
             self._stop_psip_sender_locked(state)
 
     def _normalize_stream_target(self, target: str) -> Optional[str]:
@@ -1694,14 +1810,18 @@ class DiscoveryServer:
         ssrc = (int(rf.get("physical") or 1) << 16) | int(rf.get("program") or ATSC_PROGRAM_NUMBER)
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                started_at = time.monotonic()
                 while not stop_event.is_set():
-                    for offset in range(0, len(ts_packets), 7):
-                        payload = b"".join(ts_packets[offset:offset + 7])
-                        datagram = self._wrap_rtp_mpegts(payload, sequence, timestamp, ssrc) if is_rtp else payload
-                        sock.sendto(datagram, addr)
-                        sequence = (sequence + 1) & 0xFFFF
-                        timestamp = (timestamp + 1500) & 0xFFFFFFFF
-                    time.sleep(0.1)
+                    warmup = time.monotonic() - started_at < 1.25
+                    repeats = 4 if warmup else 1
+                    for _ in range(repeats):
+                        for offset in range(0, len(ts_packets), 7):
+                            payload = b"".join(ts_packets[offset:offset + 7])
+                            datagram = self._wrap_rtp_mpegts(payload, sequence, timestamp, ssrc) if is_rtp else payload
+                            sock.sendto(datagram, addr)
+                            sequence = (sequence + 1) & 0xFFFF
+                            timestamp = (timestamp + 1500) & 0xFFFFFFFF
+                    time.sleep(0.025 if warmup else 0.1)
         except OSError as e:
             logger.debug(f"ATSC PSIP sender failed for {target}: {e}")
 
@@ -1887,9 +2007,11 @@ class DiscoveryServer:
         if self._is_network_media_source(source_url):
             input_args.extend([
                 "-rw_timeout", "15000000",
+                "-http_persistent", "0",
                 "-reconnect_at_eof", "1",
                 "-reconnect_streamed", "1",
                 "-reconnect_delay_max", "2",
+                "-reconnect_on_http_error", "4xx,5xx",
                 "-reconnect_on_network_error", "1",
                 "-user_agent", "VLC/3.0.20 LibVLC/3.0.20",
             ])
@@ -1906,6 +2028,14 @@ class DiscoveryServer:
                 ])
         elif self._looks_like_local_hls(source_url):
             input_args.extend([
+                "-rw_timeout", "15000000",
+                "-http_persistent", "0",
+                "-reconnect_at_eof", "1",
+                "-reconnect_streamed", "1",
+                "-reconnect_delay_max", "2",
+                "-reconnect_on_http_error", "4xx,5xx",
+                "-reconnect_on_network_error", "1",
+                "-user_agent", "VLC/3.0.20 LibVLC/3.0.20",
                 "-thread_queue_size", "1024",
                 "-protocol_whitelist", "file,http,https,tcp,tls,crypto,udp,rtp",
                 "-allowed_extensions", "ALL",

@@ -302,10 +302,10 @@ def build_lineup(
         low_freq = frequency - 3000000
         high_freq = frequency + 3000000
         pmt_pid, video_pid, audio_pid = _mpegts_pids_for_program(program_number)
-        safe_name = _safe_program_name(ch.name)
+        scanned_call_sign = _atsc_scanned_call_sign(ch.name)
         program_pids = f"0,16,17,{pmt_pid},{video_pid},{audio_pid}"
         program_table = (
-            f"[{program_number}:{pmt_pid}:{safe_name}:{program_pids}]"
+            f"[{program_number}:{pmt_pid}:{scanned_call_sign}:{program_pids}]"
             f"[tsid=0x{physical_channel:04x}]"
         )
         ch_map[guide_number] = ch
@@ -313,6 +313,8 @@ def build_lineup(
         lineup.append({
             "GuideNumber": guide_number,
             "GuideName": ch.name,
+            "CallSign": scanned_call_sign,
+            "ScannedCallSign": scanned_call_sign,
             "URL": url,
             "Modulation": "8vsb",
             "PhysicalChannel": physical_channel,
@@ -396,3 +398,7 @@ def _mpegts_pids_for_program(program_number: int) -> Tuple[int, int, int]:
 def _safe_program_name(name: str) -> str:
     clean = re.sub(r"[^A-Za-z0-9_.+-]+", "-", name or "VirtualHD")
     return clean.strip("-")[:32] or "VirtualHD"
+
+
+def _atsc_scanned_call_sign(name: str) -> str:
+    return _safe_program_name(name)[:7]

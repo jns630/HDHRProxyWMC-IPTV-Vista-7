@@ -126,16 +126,18 @@ def _build_channel_metadata(
         station_id = _make_station_id(xmltv_id, guide_number, fallback_counter)
         service_id = f"s{fallback_counter}"
         fallback_counter += 1
+        guide_name = str(item.get("GuideName") or getattr(channel, "name", guide_number))
+        scanned_call_sign = _lineup_scanned_call_sign(item, guide_name)
         meta_by_service[service_id] = {
             "guide_number": guide_number,
             "major": major,
             "minor": minor,
             "service_id": service_id,
-            "station_id": _lookup_station_id(epg123_station_ids, make_call_sign(str(item.get("GuideName") or getattr(channel, "name", guide_number))), station_id),
+            "station_id": _lookup_station_id(epg123_station_ids, scanned_call_sign, station_id),
             "xmltv_id": xmltv_id,
             "source_tvg_id": tvg_id,
-            "service_name": str(item.get("GuideName") or getattr(channel, "name", guide_number)),
-            "call_sign": make_call_sign(str(item.get("GuideName") or getattr(channel, "name", guide_number))),
+            "service_name": guide_name,
+            "call_sign": scanned_call_sign,
         }
     return meta_by_service
 
@@ -658,3 +660,15 @@ def make_call_sign(name: str) -> str:
     if not text:
         return "HDHR"
     return text[:24]
+
+
+def _lineup_scanned_call_sign(item: Dict, fallback_name: str) -> str:
+    explicit = str(item.get("ScannedCallSign") or item.get("CallSign") or "").strip()
+    if explicit:
+        return _safe_atsc_call_sign(explicit)
+    return _safe_atsc_call_sign(fallback_name)
+
+
+def _safe_atsc_call_sign(name: str) -> str:
+    clean = re.sub(r"[^A-Za-z0-9_.+-]+", "-", name or "VirtualHD")
+    return (clean.strip("-")[:7] or "Virtual")[:7]
