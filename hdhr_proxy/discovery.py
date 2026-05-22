@@ -2028,14 +2028,6 @@ class DiscoveryServer:
                 ])
         elif self._looks_like_local_hls(source_url):
             input_args.extend([
-                "-rw_timeout", "15000000",
-                "-http_persistent", "0",
-                "-reconnect_at_eof", "1",
-                "-reconnect_streamed", "1",
-                "-reconnect_delay_max", "2",
-                "-reconnect_on_http_error", "4xx,5xx",
-                "-reconnect_on_network_error", "1",
-                "-user_agent", "VLC/3.0.20 LibVLC/3.0.20",
                 "-thread_queue_size", "1024",
                 "-protocol_whitelist", "file,http,https,tcp,tls,crypto,udp,rtp",
                 "-allowed_extensions", "ALL",
