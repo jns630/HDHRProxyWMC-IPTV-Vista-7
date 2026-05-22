@@ -265,6 +265,8 @@ Notes:
 
 The proxy can also convert XMLTV into a Windows Media Center MXF file and optionally import it with `loadmxf.exe`.
 
+When `--vista` is enabled, MXF generation switches to a Vista-oriented guide shape with OTA-style channel matching fields instead of the default Windows 7+ style.
+
 Generate `guide.mxf`:
 
 ```powershell
@@ -297,17 +299,57 @@ Whenever XMLTV is loaded, the proxy now also writes two helper files for Windows
 
 - `HDHRProxyWMC_GuideMatch.generated.csv`
 - `HDHRProxyWMC_GuideOnly.generated.ini`
+- `HDHRProxyWMC_AutoMatch.generated.mxf`
 
 What they do:
 
 - The CSV shows the current lineup channel, guide number, call sign, matched XMLTV id, and listing count.
 - The guide-only INI contains just the channels that actually matched guide data.
+- The auto-match MXF is a filtered guide import file that uses the current lineup's channel numbers for WMC auto-attachment.
 
-This is meant for the WMC flow after scanning:
+This is meant for the WMC flow after scanning. The order matters because WMC has to create its scanned tuner lineup before the guide mapper can attach listings to it:
 
-1. Scan the virtual tuner channels.
-2. Use the generated CSV as your attach-listings reference.
-3. If you want only channels that exist in the guide, use `HDHRProxyWMC_GuideOnly.generated.ini` as the filtered mapping reference.
+1. Start the proxy with your M3U playlist and scan the virtual tuner channels in WMC first.
+2. Close WMC after the scan finishes so the guide database is not being held open by the UI.
+3. Re-run the proxy with the same M3U/XMLTV inputs plus `--map-guide-wmc`.
+4. The mapper generates an EPG123-compatible auto-match MXF, imports it, subscribes the imported guide lineup to the scanned WMC tuner lineup, and triggers the WMC reindex task.
+5. Reopen WMC and check the Guide.
+
+The actual command-line flag is `--map-guide-wmc`.
+
+You can generate and import the auto-match MXF directly:
+
+```powershell
+python main.py --m3u-file "us_pluto.m3u" --xmltv-url "https://i.mjh.nz/PlutoTV/us.xml" --import-auto-match-mxf
+```
+
+Or with the EXE:
+
+```powershell
+.\dist\HDHRProxyWMC-IPTV.exe --m3u-file "us_pluto.m3u" --xmltv-url "https://i.mjh.nz/PlutoTV/us.xml" --import-auto-match-mxf
+```
+
+With `--vista`, the auto-match MXF also switches to the Vista-oriented MXF shape before import.
+
+After the scan exists inside WMC, run the one-shot utility that maps guide data into the WMC internal database for the current lineup:
+
+```powershell
+python main.py --m3u-file "us_pluto.m3u" --xmltv-url "https://i.mjh.nz/PlutoTV/us.xml" --map-guide-wmc
+```
+
+Or:
+
+```powershell
+.\dist\HDHRProxyWMC-IPTV.exe --m3u-file "us_pluto.m3u" --xmltv-url "https://i.mjh.nz/PlutoTV/us.xml" --map-guide-wmc
+```
+
+For Vista testing, add `--vista` to the same command:
+
+```powershell
+.\dist\HDHRProxyWMC-IPTV.exe --m3u-file "us_pluto.m3u" --xmltv-url "https://i.mjh.nz/PlutoTV/us.xml" --map-guide-wmc --vista
+```
+
+`--map-guide-wmc` uses EPG123 when it is installed, because EPG123 knows how to activate and auto-map imported guide lineups against WMC's scanned tuner channels. If EPG123 is not installed, the proxy falls back to `loadmxf.exe`, but that fallback can import listings without fully attaching them to the scanned channels.
 
 ### Guide-only WMC scan mode
 

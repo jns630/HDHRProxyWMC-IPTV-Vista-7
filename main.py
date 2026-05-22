@@ -25,8 +25,18 @@ from hdhr_proxy.config import Config
 from hdhr_proxy.m3u_parser import M3UParser, build_lineup
 from hdhr_proxy.discovery import DiscoveryServer, normalize_device_id
 from hdhr_proxy.http_server import HDHRHTTPServer
-from hdhr_proxy.guide_match import build_guide_match_rows, filter_lineup_to_matched_channels, write_guide_match_utility
-from hdhr_proxy.mxf import write_mxf, import_mxf
+from hdhr_proxy.guide_match import (
+    build_guide_match_rows,
+    filter_lineup_to_matched_channels,
+    write_guide_match_utility,
+    write_wmc_auto_match_mxf,
+)
+from hdhr_proxy.mxf import (
+    write_mxf,
+    import_mxf,
+    import_and_map_mxf_with_epg123,
+    run_wmc_post_import_tasks,
+)
 from hdhr_proxy.xmltv import load_xmltv
 
 logger = logging.getLogger("main")
@@ -287,15 +297,46 @@ def run_proxy(cfg: Config):
     )
     xmltv_data = load_xmltv(cfg.xmltv_file, cfg.xmltv_url, channel_map)
     generated_mxf_path = None
+    auto_match_mxf_path = None
     if xmltv_data:
         logger.info("Loaded XMLTV guide from %s", xmltv_data.source)
         if cfg.write_mxf or cfg.import_mxf:
-            mxf_path = write_mxf(xmltv_data.filtered_xml, lineup, channel_map, cfg.mxf_file)
+            mxf_path = write_mxf(
+                xmltv_data.filtered_xml,
+                lineup,
+                channel_map,
+                cfg.mxf_file,
+                vista_mode=bool(getattr(cfg, "force_vista_mode", False)),
+            )
             generated_mxf_path = mxf_path
             if cfg.import_mxf:
                 import_mxf(mxf_path)
         elif cfg.mxf_file and os.path.exists(cfg.mxf_file):
             generated_mxf_path = os.path.abspath(cfg.mxf_file)
+        if cfg.write_auto_match_mxf or cfg.import_auto_match_mxf or xmltv_data:
+            auto_match_mxf_path, auto_match_count = write_wmc_auto_match_mxf(
+                lineup,
+                channel_map,
+                xmltv_data.filtered_xml,
+                output_path=cfg.auto_match_mxf_file,
+                vista_mode=bool(getattr(cfg, "force_vista_mode", False)),
+                epg123_mode=bool(getattr(cfg, "map_guide_wmc", False)),
+            )
+            logger.info("Wrote WMC auto-match MXF (%s matched channels): %s", auto_match_count, auto_match_mxf_path)
+            if cfg.import_auto_match_mxf:
+                if getattr(cfg, "map_guide_wmc", False):
+                    logger.info("Importing lineup-matched guide into the WMC internal database via EPG123 auto-match when available")
+                    try:
+                        import_and_map_mxf_with_epg123(auto_match_mxf_path)
+                    except FileNotFoundError:
+                        logger.warning("EPG123 client not found; falling back to loadmxf.exe without automatic channel mapping.")
+                        import_mxf(auto_match_mxf_path)
+                    except Exception as exc:
+                        logger.warning("EPG123 auto-match import failed; falling back to loadmxf.exe. %s", exc)
+                        import_mxf(auto_match_mxf_path)
+                    run_wmc_post_import_tasks()
+                else:
+                    import_mxf(auto_match_mxf_path)
         guide_rows = build_guide_match_rows(
             lineup,
             channel_map,
@@ -407,8 +448,12 @@ Examples:
     parser.add_argument("--xmltv-file", help="Path to local XMLTV guide file")
     parser.add_argument("--xmltv-url", help="URL to remote XMLTV guide file")
     parser.add_argument("--mxf-file", default="guide.mxf", help="Output Windows Media Center MXF guide path")
+    parser.add_argument("--auto-match-mxf-file", default="HDHRProxyWMC_AutoMatch.generated.mxf", help="Output WMC auto-match MXF path")
     parser.add_argument("--write-mxf", action="store_true", help="Generate a Windows Media Center MXF guide file")
     parser.add_argument("--import-mxf", action="store_true", help="Generate and import the MXF guide into Windows Media Center")
+    parser.add_argument("--write-auto-match-mxf", action="store_true", help="Generate a WMC auto-match MXF mapped to the current lineup")
+    parser.add_argument("--import-auto-match-mxf", action="store_true", help="Generate and import a WMC auto-match MXF mapped to the current lineup")
+    parser.add_argument("--map-guide-wmc", action="store_true", help="Generate and import a lineup-matched guide directly into the WMC internal database")
     parser.add_argument("--guide-only-lineup", action="store_true", help="Only advertise channels that matched XMLTV/MXF guide data")
     parser.add_argument(
         "--hls-base-url",
@@ -459,10 +504,19 @@ Examples:
         cfg.xmltv_url = args.xmltv_url
     if args.mxf_file:
         cfg.mxf_file = args.mxf_file
+    if args.auto_match_mxf_file:
+        cfg.auto_match_mxf_file = args.auto_match_mxf_file
     if args.write_mxf:
         cfg.write_mxf = True
     if args.import_mxf:
         cfg.import_mxf = True
+    if args.write_auto_match_mxf:
+        cfg.write_auto_match_mxf = True
+    if args.import_auto_match_mxf:
+        cfg.import_auto_match_mxf = True
+    if args.map_guide_wmc:
+        cfg.map_guide_wmc = True
+        cfg.import_auto_match_mxf = True
     if args.guide_only_lineup:
         cfg.guide_only_lineup = True
     if args.port:

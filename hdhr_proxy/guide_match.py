@@ -5,7 +5,7 @@ import xml.etree.ElementTree as ET
 from typing import Dict, List, Optional, Tuple
 
 from .m3u_parser import M3UChannel
-from .mxf import make_call_sign
+from .mxf import make_call_sign, write_mxf
 from .xmltv import resolve_channel_xmltv_ids
 
 logger = logging.getLogger(__name__)
@@ -25,6 +25,28 @@ def write_guide_match_utility(
     csv_path = write_guide_match_csv(rows, csv_path)
     mapping_path = write_guide_only_mapping_file(lineup, rows, mapping_path)
     return csv_path, mapping_path, len(rows)
+
+
+def write_wmc_auto_match_mxf(
+    lineup: List[Dict],
+    channel_map: Dict[str, M3UChannel],
+    xmltv_xml: str,
+    output_path: str = "HDHRProxyWMC_AutoMatch.generated.mxf",
+    vista_mode: bool = False,
+    epg123_mode: bool = False,
+) -> Tuple[str, int]:
+    rows = build_guide_match_rows(lineup, channel_map, xmltv_xml)
+    filtered_lineup, filtered_channel_map = filter_lineup_to_matched_channels(lineup, channel_map, rows)
+    out_path = write_mxf(
+        xmltv_xml,
+        filtered_lineup,
+        filtered_channel_map,
+        output_path,
+        vista_mode=vista_mode,
+        force_ota_match=True,
+        epg123_mode=epg123_mode,
+    )
+    return out_path, len(filtered_lineup)
 
 
 def filter_lineup_to_matched_channels(
