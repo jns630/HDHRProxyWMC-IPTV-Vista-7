@@ -1399,12 +1399,20 @@ class DiscoveryServer:
         current_rf = state.get("rf") or {}
         current_physical = int(current_rf.get("physical") or 0)
         if current_physical:
-            for rf in av_matches:
-                if int(rf.get("physical") or 0) == current_physical:
-                    return rf.get("channel_id"), rf
-            for rf in pmt_matches:
-                if int(rf.get("physical") or 0) == current_physical:
-                    return rf.get("channel_id"), rf
+            current_av_matches = [
+                rf for rf in av_matches
+                if int(rf.get("physical") or 0) == current_physical
+            ]
+            current_pmt_matches = [
+                rf for rf in pmt_matches
+                if int(rf.get("physical") or 0) == current_physical
+            ]
+            if len(current_av_matches) == 1:
+                return current_av_matches[0].get("channel_id"), current_av_matches[0]
+            if not current_av_matches and len(current_pmt_matches) == 1:
+                return current_pmt_matches[0].get("channel_id"), current_pmt_matches[0]
+            if len(current_av_matches) > 1 or len(current_pmt_matches) > 1:
+                return None, None
         if len(av_matches) == 1:
             return av_matches[0].get("channel_id"), av_matches[0]
         if len(pmt_matches) == 1:

@@ -168,7 +168,7 @@ def _collect_programmes(xmltv_xml: str, channel_meta: Dict[str, Dict]) -> Dict[s
         if not start_dt or not stop_dt or stop_dt <= start_dt:
             continue
         duration = int((stop_dt - start_dt).total_seconds())
-        title = _child_text(programme, "title") or meta["service_name"]
+        title = _child_text(programme, "title") or metas[0]["service_name"]
         episode_title = _child_text(programme, "sub-title")
         description = _child_text(programme, "desc")
         season_num, episode_num = _extract_episode_numbers(programme)
@@ -280,13 +280,12 @@ def _build_mxf_root(
         schedule_entries_el = ET.SubElement(with_el, ns("ScheduleEntries"), {
             "service": meta["service_id"],
         })
-        for index, program in enumerate(service_programmes.get(meta["service_id"], [])):
+        for program in service_programmes.get(meta["service_id"], []):
             attrs = {
                 "program": program["id"],
                 "duration": program["duration"],
+                "startTime": program["start_time"],
             }
-            if index == 0:
-                attrs["startTime"] = program["start_time"]
             ET.SubElement(schedule_entries_el, ns("ScheduleEntry"), attrs)
 
     lineups_el = ET.SubElement(with_el, ns("Lineups"))
@@ -421,15 +420,14 @@ def _build_vista_mxf_root(
         schedule_entries_el = ET.SubElement(with_el, "ScheduleEntries", {
             "service": meta["service_id"],
         })
-        for index, program in enumerate(service_programmes.get(meta["service_id"], [])):
+        for program in service_programmes.get(meta["service_id"], []):
             attrs = {
                 "program": program["id"],
                 "duration": program["duration"],
+                "startTime": program["start_time"].replace(".000Z", "Z"),
                 "isCC": "true",
                 "audioFormat": "2",
             }
-            if index == 0:
-                attrs["startTime"] = program["start_time"].replace(".000Z", "Z")
             ET.SubElement(schedule_entries_el, "ScheduleEntry", attrs)
 
     lineups_el = ET.SubElement(with_el, "Lineups")

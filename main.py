@@ -22,7 +22,7 @@ import threading
 import time
 
 from hdhr_proxy.config import Config
-from hdhr_proxy.m3u_parser import M3UParser, build_lineup
+from hdhr_proxy.m3u_parser import M3UParser, VISTA_US_BCAST_LAST_PHYSICAL_CHANNEL, build_lineup
 from hdhr_proxy.discovery import DiscoveryServer, normalize_device_id
 from hdhr_proxy.http_server import HDHRHTTPServer
 from hdhr_proxy.guide_match import (
@@ -294,6 +294,11 @@ def run_proxy(cfg: Config):
         base_url=base_url,
         channel_mapping=cfg.channel_mapping,
         tuner_count=cfg.tuner_count,
+        max_physical_channel=(
+            VISTA_US_BCAST_LAST_PHYSICAL_CHANNEL
+            if getattr(cfg, "force_vista_mode", False)
+            else cfg.get("max_physical_channel", 69)
+        ),
     )
     xmltv_data = load_xmltv(cfg.xmltv_file, cfg.xmltv_url, channel_map)
     generated_mxf_path = None
@@ -354,8 +359,10 @@ def run_proxy(cfg: Config):
         if cfg.guide_only_lineup:
             lineup, channel_map = filter_lineup_to_matched_channels(lineup, channel_map, guide_rows)
             logger.info("Guide-only lineup mode enabled: advertising %s matched channels to WMC scan", len(lineup))
+    elif cfg.import_mxf and cfg.mxf_file and os.path.exists(cfg.mxf_file):
+        import_mxf(cfg.mxf_file)
     elif cfg.write_mxf or cfg.import_mxf:
-        logger.error("MXF generation/import requires --xmltv-file or --xmltv-url.")
+        logger.error("MXF generation requires --xmltv-file or --xmltv-url. To import an existing file, use --import-mxf path\\to\\guide.mxf.")
         sys.exit(1)
     logger.info(f"Lineup has {len(lineup)} channels")
     mapping_path = write_hdhrproxy_mapping_file(lineup)
@@ -450,7 +457,13 @@ Examples:
     parser.add_argument("--mxf-file", default="guide.mxf", help="Output Windows Media Center MXF guide path")
     parser.add_argument("--auto-match-mxf-file", default="HDHRProxyWMC_AutoMatch.generated.mxf", help="Output WMC auto-match MXF path")
     parser.add_argument("--write-mxf", action="store_true", help="Generate a Windows Media Center MXF guide file")
-    parser.add_argument("--import-mxf", action="store_true", help="Generate and import the MXF guide into Windows Media Center")
+    parser.add_argument(
+        "--import-mxf",
+        nargs="?",
+        const=True,
+        metavar="MXF_FILE",
+        help="Generate and import the MXF guide, or import the given existing MXF file",
+    )
     parser.add_argument("--write-auto-match-mxf", action="store_true", help="Generate a WMC auto-match MXF mapped to the current lineup")
     parser.add_argument("--import-auto-match-mxf", action="store_true", help="Generate and import a WMC auto-match MXF mapped to the current lineup")
     parser.add_argument("--map-guide-wmc", action="store_true", help="Generate and import a lineup-matched guide directly into the WMC internal database")
@@ -510,6 +523,8 @@ Examples:
         cfg.write_mxf = True
     if args.import_mxf:
         cfg.import_mxf = True
+        if isinstance(args.import_mxf, str):
+            cfg.mxf_file = args.import_mxf
     if args.write_auto_match_mxf:
         cfg.write_auto_match_mxf = True
     if args.import_auto_match_mxf:
@@ -548,6 +563,10 @@ Examples:
     # Windows service commands
     if args.command:
         _handle_service_command(args.command, cfg)
+        return
+
+    if cfg.import_mxf and isinstance(args.import_mxf, str) and not cfg.m3u_file and not cfg.m3u_url and not cfg.xmltv_file and not cfg.xmltv_url:
+        import_mxf(cfg.mxf_file)
         return
 
     run_proxy(cfg)
