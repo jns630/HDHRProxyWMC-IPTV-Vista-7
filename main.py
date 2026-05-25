@@ -22,7 +22,7 @@ import threading
 import time
 
 from hdhr_proxy.config import Config
-from hdhr_proxy.m3u_parser import M3UParser, VISTA_US_BCAST_LAST_PHYSICAL_CHANNEL, build_lineup
+from hdhr_proxy.m3u_parser import M3UParser, build_lineup
 from hdhr_proxy.discovery import DiscoveryServer, normalize_device_id
 from hdhr_proxy.http_server import HDHRHTTPServer
 from hdhr_proxy.guide_match import (
@@ -294,11 +294,7 @@ def run_proxy(cfg: Config):
         base_url=base_url,
         channel_mapping=cfg.channel_mapping,
         tuner_count=cfg.tuner_count,
-        max_physical_channel=(
-            VISTA_US_BCAST_LAST_PHYSICAL_CHANNEL
-            if getattr(cfg, "force_vista_mode", False)
-            else cfg.get("max_physical_channel", 69)
-        ),
+        max_physical_channel=cfg.get("max_physical_channel", 69),
     )
     xmltv_data = load_xmltv(cfg.xmltv_file, cfg.xmltv_url, channel_map)
     generated_mxf_path = None
