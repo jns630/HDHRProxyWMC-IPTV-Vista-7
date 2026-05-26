@@ -36,7 +36,7 @@ class M3UParser:
         r'#EXTINF:(?P<duration>-?\d+)\s*'
         r'(?P<props>.*?)\s*,\s*(?P<name>.*)'
     )
-    PROP_RE = re.compile(r'(\w+)\s*=\s*"(.*?)"')
+    PROP_RE = re.compile(r'([\w-]+)\s*=\s*"(.*?)"')
 
     @classmethod
     def parse_url(cls, url: str) -> List[M3UChannel]:
@@ -320,6 +320,8 @@ def build_lineup(
             "URL": url,
             "Modulation": "8vsb",
             "PhysicalChannel": physical_channel,
+            "VirtualMajor": physical_channel,
+            "VirtualMinor": virtual_minor,
             "Frequency": frequency,
             "LowFreq": low_freq,
             "HighFreq": high_freq,

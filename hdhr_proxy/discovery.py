@@ -794,7 +794,8 @@ class DiscoveryServer:
             if "." in guide:
                 major, minor = guide.split(".", 1)
             else:
-                major, minor = str(physical_channel), "1"
+                major = str(item.get("VirtualMajor") or physical_channel)
+                minor = str(item.get("VirtualMinor") or 1)
             program_number = int(item.get("ProgramNumber") or ATSC_PROGRAM_NUMBER)
             original_pmt_pid = int(item.get("PMTPID") or 0x31)
             original_video_pid = int(item.get("VideoPID") or 0x41)
