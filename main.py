@@ -318,7 +318,7 @@ def run_proxy(cfg: Config):
         channel_mapping=cfg.channel_mapping,
         tuner_count=cfg.tuner_count,
         max_physical_channel=cfg.get("max_physical_channel", 69),
-        programs_per_physical=20 if getattr(cfg, "force_vista_mode", False) else cfg.get("programs_per_physical"),
+        programs_per_physical=cfg.get("programs_per_physical"),
     )
     xmltv_data = load_xmltv(cfg.xmltv_file, cfg.xmltv_url, channel_map)
     generated_mxf_path = None
@@ -510,6 +510,7 @@ Examples:
     parser.add_argument("--audio-codec", default="ac3", help="ffmpeg output audio codec")
     parser.add_argument("--bitrate", default="4000k", help="ffmpeg output bitrate")
     parser.add_argument("--vista", action="store_true", help="Force Vista-specific WMC codec behavior for client testing")
+    parser.add_argument("--vista-subchannels", type=int, help="Vista scan test mode: fixed subchannels per RF, for example 20")
 
     # Windows service commands
     parser.add_argument(
@@ -579,6 +580,8 @@ Examples:
         cfg.ffmpeg_bitrate = args.bitrate
     if args.vista:
         cfg.force_vista_mode = True
+    if args.vista_subchannels:
+        cfg.programs_per_physical = args.vista_subchannels
 
     # Windows service commands
     if args.command:
