@@ -69,6 +69,16 @@ The current build includes a few practical WMC-focused fixes:
 
 These fixes were added specifically to prevent wrong-channel playback, black screens, and premature `No TV Signal` failures during WMC tuning.
 
+## Changelog
+
+### Current working build
+
+- Added richer Rovi/EPG123-style MXF guide metadata for WMC, including populated keyword groups, guide images, movie flags, series flags, news flags, genre hints, short descriptions, and fallback star metadata.
+- Improved Pluto-style XMLTV imports that only provide title, description, and artwork by inferring movie, series, and news guide categories from the active M3U lineup and channel names.
+- Fixed EPG123 MXF import compatibility by generating numeric guide image IDs instead of hex-style IDs.
+- Improved HLS playback selection for Pluto-like playlists by resolving nested variants, selecting normal audio over descriptive audio when available, and preserving the correct video stream mapping.
+- Rebuilt the packaged `dist/HDHRProxyWMC-IPTV.exe` x64 build and `dist/HDHRProxyWMC-IPTV-vista-x86.exe` 32-bit Vista build.
+
 ## Project Layout
 
 ```text

@@ -1252,9 +1252,17 @@ class DiscoveryServer:
             if uri == selected:
                 selected_attrs = attrs
                 break
-        audio_url = self._select_hls_audio_url(raw, base_url, selected_attrs)
         video_url = urllib.parse.urljoin(base_url, selected)
+        audio_master_text = raw
+        audio_base_url = base_url
+        video_url, nested_attrs, nested_raw, nested_base_url = self._resolve_nested_hls_variant(video_url)
+        if nested_attrs:
+            selected_attrs.update(nested_attrs)
+            audio_master_text = nested_raw
+            audio_base_url = nested_base_url
+        audio_url = self._select_hls_audio_url(audio_master_text, audio_base_url, selected_attrs)
         bandwidth = selected_attrs.get("average-bandwidth") or selected_attrs.get("bandwidth") or "3000000"
+        resolution = selected_attrs.get("resolution") or "unknown"
 
         lines = [
             "#EXTM3U",
@@ -1264,6 +1272,8 @@ class DiscoveryServer:
             lines.append(
                 f'#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",LANGUAGE="en",NAME="English",AUTOSELECT=YES,DEFAULT=YES,CHANNELS="2",URI="{audio_url}"'
             )
+        video_map = "0:v:1?" if audio_url and self._hls_audio_playlist_may_include_video(audio_url) else "0:v:0?"
+        lines.append(f"#HDHR-PROXY-VIDEO-MAP:{video_map}")
         stream_inf = f"#EXT-X-STREAM-INF:PROGRAM-ID=1,BANDWIDTH={bandwidth}"
         if audio_url:
             stream_inf += ',AUDIO="audio"'
@@ -1274,8 +1284,42 @@ class DiscoveryServer:
         with open(path, "w", encoding="utf-8", newline="\n") as f:
             f.write("\n".join(lines))
         self._prepared_input_cache[source_url] = (path, now + 6)
-        logger.info("Using local Pluto HLS master for playback: %s", path)
+        logger.info(
+            "Using local Pluto HLS master for playback: %s video=%s bandwidth=%s resolution=%s audio=%s",
+            path,
+            video_url,
+            bandwidth,
+            resolution,
+            audio_url or "none",
+        )
         return path
+
+    def _resolve_nested_hls_variant(self, video_url: str) -> Tuple[str, Dict[str, str], str, str]:
+        try:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122 Safari/537.36",
+                "Accept": "application/vnd.apple.mpegurl,application/x-mpegURL,*/*",
+                "Origin": "https://pluto.tv",
+                "Referer": "https://pluto.tv/",
+            }
+            with urllib.request.urlopen(urllib.request.Request(video_url, headers=headers), timeout=8) as resp:
+                base_url = resp.geturl() or video_url
+                raw = resp.read(256 * 1024).decode("utf-8", errors="replace")
+        except Exception as exc:
+            logger.debug("Unable to inspect nested HLS variant %s: %s", video_url, exc)
+            return video_url, {}, "", video_url
+
+        variants = M3UParser._hls_variant_uris(raw)
+        selected = M3UParser._select_hls_variant(variants)
+        if not selected:
+            return video_url, {}, raw, base_url
+
+        selected_attrs = {}
+        for uri, attrs in variants:
+            if uri == selected:
+                selected_attrs = attrs
+                break
+        return urllib.parse.urljoin(base_url, selected), selected_attrs, raw, base_url
 
     def _select_hls_audio_url(self, master_text: str, base_url: str, selected_attrs: Dict[str, str]) -> Optional[str]:
         group_id = (selected_attrs.get("audio") or "").strip()
@@ -1283,6 +1327,7 @@ class DiscoveryServer:
             return None
 
         entries = []
+        matching_entries = []
         for line in master_text.splitlines():
             line = line.strip()
             if not line.upper().startswith("#EXT-X-MEDIA:"):
@@ -1290,14 +1335,14 @@ class DiscoveryServer:
             attrs = self._parse_hls_attribute_list(line.split(":", 1)[1])
             if (attrs.get("type") or "").upper() != "AUDIO":
                 continue
-            if attrs.get("group-id") != group_id:
-                continue
             uri = attrs.get("uri")
             if not uri:
                 continue
             entries.append(attrs)
+            if attrs.get("group-id") == group_id:
+                matching_entries.append(attrs)
 
-        if not entries:
+        if not matching_entries:
             return None
 
         def score(attrs: Dict[str, str]) -> Tuple[int, int, int, int]:
@@ -1314,8 +1359,32 @@ class DiscoveryServer:
                 1 if is_autoselect else 0,
             )
 
-        selected = max(entries, key=score)
+        selected = max(matching_entries, key=score)
+        selected_name = (selected.get("name") or "").lower()
+        selected_is_descriptive = any(token in selected_name for token in ("description", "descriptive", "audio-description", "ad)"))
+        if selected_is_descriptive:
+            fallback_entries = [entry for entry in entries if score(entry)[0] > 0]
+            if fallback_entries:
+                selected = max(fallback_entries, key=score)
         return urllib.parse.urljoin(base_url, selected["uri"])
+
+    def _hls_audio_playlist_may_include_video(self, audio_url: str) -> bool:
+        lowered = (audio_url or "").lower()
+        if any(token in lowered for token in ("audio-description", "descriptive", "description")):
+            return True
+        try:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122 Safari/537.36",
+                "Accept": "application/vnd.apple.mpegurl,application/x-mpegURL,*/*",
+                "Origin": "https://pluto.tv",
+                "Referer": "https://pluto.tv/",
+            }
+            with urllib.request.urlopen(urllib.request.Request(audio_url, headers=headers), timeout=5) as resp:
+                raw = resp.read(128 * 1024).decode("utf-8", errors="replace").lower()
+        except Exception as exc:
+            logger.debug("Unable to inspect HLS audio playlist %s: %s", audio_url, exc)
+            return False
+        return "#ext-x-stream-inf" in raw or "/video/" in raw or "hls_300-" in raw or "hls_600-" in raw
 
     def _parse_hls_attribute_list(self, text: str) -> Dict[str, str]:
         attrs = {}
@@ -2088,8 +2157,9 @@ class DiscoveryServer:
             ])
 
         input_args.extend(["-i", source_url])
+        video_map = self._local_hls_video_map(source_url)
         return input_args + [
-            "-map", "0:v:0?",
+            "-map", video_map,
             "-map", "0:a:0?",
             "-fps_mode", "cfr",
             "-dn",
@@ -2192,6 +2262,24 @@ class DiscoveryServer:
             return False
         path = parsed.path if scheme == "file" else source_url
         return os.path.splitext(path)[1].lower() in (".m3u8", ".m3u")
+
+    def _local_hls_video_map(self, source_url: str) -> str:
+        parsed = urllib.parse.urlparse(source_url or "")
+        scheme = parsed.scheme.lower()
+        if scheme and scheme != "file" and not re.fullmatch(r"[a-z]", scheme):
+            return "0:v:0?"
+        path = parsed.path if scheme == "file" else source_url
+        if not path or not os.path.isfile(path) or not os.path.basename(path).startswith("hdhr_pluto_"):
+            return "0:v:0?"
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                head = f.read(8192)
+        except OSError:
+            return "0:v:0?"
+        match = re.search(r"^#HDHR-PROXY-VIDEO-MAP:(\S+)", head, flags=re.MULTILINE)
+        if match and match.group(1) in ("0:v:0?", "0:v:1?"):
+            return match.group(1)
+        return "0:v:0?"
 
     def _resolve_ffmpeg_path(self, ffmpeg_path: str) -> str:
         if ffmpeg_path and os.path.isfile(ffmpeg_path):
