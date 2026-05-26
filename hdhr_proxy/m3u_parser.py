@@ -285,20 +285,20 @@ def build_lineup(
     lineup = []
     ch_map: Dict[str, M3UChannel] = {}
     mapping = channel_mapping or {}
-    programs_per_physical = _programs_per_physical_for_lineup_size(len(channels), max_physical_channel)
-    physicals_used = _physical_channels_used_for_lineup_size(len(channels), programs_per_physical)
+    physical_count = _physical_channel_count(max_physical_channel)
+    physicals_used = min(len(channels), physical_count) if channels else 0
+    max_programs_per_physical = _max_programs_per_physical_for_lineup_size(len(channels), max_physical_channel)
     logger.info(
-        "Adaptive virtual RF layout: %s parsed channels -> %s programs/RF across %s physical channels up to RF %s",
+        "Adaptive virtual RF layout: %s parsed channels -> up to %s programs/RF across %s physical channels up to RF %s",
         len(channels),
-        programs_per_physical,
+        max_programs_per_physical,
         physicals_used,
         max_physical_channel,
     )
 
     for i, ch in enumerate(channels, start=1):
-        physical_channel = _physical_channel_for_index(i, programs_per_physical, max_physical_channel)
-        program_number = _program_number_for_index(i, programs_per_physical)
-        virtual_minor = _virtual_minor_for_index(i, programs_per_physical)
+        physical_channel, virtual_minor = _virtual_rf_assignment_for_index(i, len(channels), max_physical_channel)
+        program_number = VIRTUAL_FIRST_PROGRAM_NUMBER + virtual_minor - 1
         guide_number = ch.tvg_chno or mapping.get(ch.name, "") or f"{physical_channel}.{virtual_minor}"
         frequency = _us_bcast_frequency_for_physical_channel(physical_channel)
         low_freq = frequency - 3000000
@@ -362,6 +362,41 @@ def _physical_channels_used_for_lineup_size(channel_count: int, programs_per_phy
     if channel_count <= 0:
         return 1
     return (channel_count + max(1, programs_per_physical) - 1) // max(1, programs_per_physical)
+
+
+def _max_programs_per_physical_for_lineup_size(
+    channel_count: int,
+    max_physical_channel: int = US_BCAST_LAST_PHYSICAL_CHANNEL,
+) -> int:
+    physical_count = _physical_channel_count(max_physical_channel)
+    if channel_count <= 0:
+        return 1
+    return (channel_count + physical_count - 1) // physical_count
+
+
+def _virtual_rf_assignment_for_index(
+    index: int,
+    channel_count: int,
+    max_physical_channel: int = US_BCAST_LAST_PHYSICAL_CHANNEL,
+) -> Tuple[int, int]:
+    physical_count = _physical_channel_count(max_physical_channel)
+    zero_based = max(index, 1) - 1
+    if channel_count <= physical_count:
+        return US_BCAST_FIRST_PHYSICAL_CHANNEL + zero_based, 1
+
+    base_per_physical = channel_count // physical_count
+    extra_physicals = channel_count % physical_count
+    larger_group_size = base_per_physical + 1
+    larger_group_channels = larger_group_size * extra_physicals
+
+    if zero_based < larger_group_channels:
+        physical_offset = zero_based // larger_group_size
+        slot = zero_based % larger_group_size
+    else:
+        tail_zero = zero_based - larger_group_channels
+        physical_offset = extra_physicals + (tail_zero // base_per_physical)
+        slot = tail_zero % base_per_physical
+    return US_BCAST_FIRST_PHYSICAL_CHANNEL + physical_offset, slot + 1
 
 
 def _physical_channel_for_index(
