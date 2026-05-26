@@ -1252,7 +1252,7 @@ class DiscoveryServer:
             if uri == selected:
                 selected_attrs = attrs
                 break
-        audio_url = None
+        audio_url = self._select_hls_audio_url(raw, base_url, selected_attrs)
         video_url = urllib.parse.urljoin(base_url, selected)
         bandwidth = selected_attrs.get("average-bandwidth") or selected_attrs.get("bandwidth") or "3000000"
 
@@ -1276,6 +1276,52 @@ class DiscoveryServer:
         self._prepared_input_cache[source_url] = (path, now + 6)
         logger.info("Using local Pluto HLS master for playback: %s", path)
         return path
+
+    def _select_hls_audio_url(self, master_text: str, base_url: str, selected_attrs: Dict[str, str]) -> Optional[str]:
+        group_id = (selected_attrs.get("audio") or "").strip()
+        if not group_id:
+            return None
+
+        entries = []
+        for line in master_text.splitlines():
+            line = line.strip()
+            if not line.upper().startswith("#EXT-X-MEDIA:"):
+                continue
+            attrs = self._parse_hls_attribute_list(line.split(":", 1)[1])
+            if (attrs.get("type") or "").upper() != "AUDIO":
+                continue
+            if attrs.get("group-id") != group_id:
+                continue
+            uri = attrs.get("uri")
+            if not uri:
+                continue
+            entries.append(attrs)
+
+        if not entries:
+            return None
+
+        def score(attrs: Dict[str, str]) -> Tuple[int, int, int, int]:
+            name = (attrs.get("name") or "").lower()
+            language = (attrs.get("language") or "").lower()
+            is_descriptive = any(token in name for token in ("description", "descriptive", "audio-description", "ad)"))
+            is_english = language in ("en", "eng") or "english" in name
+            is_default = (attrs.get("default") or "").upper() == "YES"
+            is_autoselect = (attrs.get("autoselect") or "").upper() == "YES"
+            return (
+                0 if is_descriptive else 1,
+                1 if is_english else 0,
+                1 if is_default else 0,
+                1 if is_autoselect else 0,
+            )
+
+        selected = max(entries, key=score)
+        return urllib.parse.urljoin(base_url, selected["uri"])
+
+    def _parse_hls_attribute_list(self, text: str) -> Dict[str, str]:
+        attrs = {}
+        for key, value in re.findall(r'([A-Z0-9-]+)=("[^"]*"|[^,]*)', text, flags=re.IGNORECASE):
+            attrs[key.lower()] = value.strip().strip('"')
+        return attrs
 
     def _resolve_hls_source_url(self, source_url: str) -> str:
         parsed = urllib.parse.urlparse(source_url or "")
