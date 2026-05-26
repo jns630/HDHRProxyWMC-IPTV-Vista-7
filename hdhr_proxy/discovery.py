@@ -1272,8 +1272,14 @@ class DiscoveryServer:
             lines.append(
                 f'#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",LANGUAGE="en",NAME="English",AUTOSELECT=YES,DEFAULT=YES,CHANNELS="2",URI="{audio_url}"'
             )
-        video_map = "0:v:1?" if audio_url and self._hls_audio_playlist_may_include_video(audio_url) else "0:v:0?"
+        audio_map = "0:a:0?"
+        video_map = "0:v:0?"
+        if audio_url and self._hls_audio_playlist_may_include_video(audio_url):
+            video_map = "0:v:1?"
+            if self._is_descriptive_hls_audio_url(audio_url):
+                audio_map = "0:a:1?"
         lines.append(f"#HDHR-PROXY-VIDEO-MAP:{video_map}")
+        lines.append(f"#HDHR-PROXY-AUDIO-MAP:{audio_map}")
         stream_inf = f"#EXT-X-STREAM-INF:PROGRAM-ID=1,BANDWIDTH={bandwidth}"
         if audio_url:
             stream_inf += ',AUDIO="audio"'
@@ -1370,7 +1376,7 @@ class DiscoveryServer:
 
     def _hls_audio_playlist_may_include_video(self, audio_url: str) -> bool:
         lowered = (audio_url or "").lower()
-        if any(token in lowered for token in ("audio-description", "descriptive", "description")):
+        if self._is_descriptive_hls_audio_url(audio_url):
             return True
         try:
             headers = {
@@ -1385,6 +1391,10 @@ class DiscoveryServer:
             logger.debug("Unable to inspect HLS audio playlist %s: %s", audio_url, exc)
             return False
         return "#ext-x-stream-inf" in raw or "/video/" in raw or "hls_300-" in raw or "hls_600-" in raw
+
+    def _is_descriptive_hls_audio_url(self, audio_url: str) -> bool:
+        lowered = (audio_url or "").lower()
+        return any(token in lowered for token in ("audio-description", "descriptive", "description"))
 
     def _parse_hls_attribute_list(self, text: str) -> Dict[str, str]:
         attrs = {}
@@ -2158,9 +2168,10 @@ class DiscoveryServer:
 
         input_args.extend(["-i", source_url])
         video_map = self._local_hls_video_map(source_url)
+        audio_map = self._local_hls_audio_map(source_url)
         return input_args + [
             "-map", video_map,
-            "-map", "0:a:0?",
+            "-map", audio_map,
             "-fps_mode", "cfr",
             "-dn",
             "-sn",
@@ -2280,6 +2291,24 @@ class DiscoveryServer:
         if match and match.group(1) in ("0:v:0?", "0:v:1?"):
             return match.group(1)
         return "0:v:0?"
+
+    def _local_hls_audio_map(self, source_url: str) -> str:
+        parsed = urllib.parse.urlparse(source_url or "")
+        scheme = parsed.scheme.lower()
+        if scheme and scheme != "file" and not re.fullmatch(r"[a-z]", scheme):
+            return "0:a:0?"
+        path = parsed.path if scheme == "file" else source_url
+        if not path or not os.path.isfile(path) or not os.path.basename(path).startswith("hdhr_pluto_"):
+            return "0:a:0?"
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                head = f.read(8192)
+        except OSError:
+            return "0:a:0?"
+        match = re.search(r"^#HDHR-PROXY-AUDIO-MAP:(\S+)", head, flags=re.MULTILINE)
+        if match and match.group(1) in ("0:a:0?", "0:a:1?"):
+            return match.group(1)
+        return "0:a:0?"
 
     def _resolve_ffmpeg_path(self, ffmpeg_path: str) -> str:
         if ffmpeg_path and os.path.isfile(ffmpeg_path):
