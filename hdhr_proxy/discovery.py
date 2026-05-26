@@ -717,7 +717,7 @@ class DiscoveryServer:
             elif field == "filter":
                 if not value or value == "bypass":
                     state["filter"] = "0x0000-0x1FFF"
-                if self._filter_requests_playback_pids(state):
+                if self._filter_requests_playback_pids(state) and not self._should_hold_scan_psip_only(state):
                     self._stop_psip_sender_locked(state)
                 self._refresh_tuner_status(tuner_idx)
                 if self._filter_looks_specific(state.get("filter")):
@@ -1100,6 +1100,24 @@ class DiscoveryServer:
             logger.warning("Unsupported HDHR target %s", target)
             return
 
+        if (
+            not state.get("channel_id")
+            and not state.get("rf")
+            and self._is_scan_like_tune(state.get("channel"))
+            and not self._program_requests_specific_program(state.get("program"))
+        ):
+            self._stop_tuner_process_locked(state)
+            state["target"] = target
+            state["target_norm"] = ffmpeg_target
+            state["stream_rf_key"] = (0, 0)
+            logger.info(
+                "Ignoring scan target %s for tuner%s because tuned RF %s is outside the virtual lineup",
+                target,
+                tuner_idx,
+                state.get("channel"),
+            )
+            return
+
         proc = state.get("process")
         rf_key = self._rf_stream_key(state.get("rf") or {})
         if state.get("target_norm") == ffmpeg_target and state.get("stream_rf_key") == rf_key and proc and proc.poll() is None:
@@ -1111,12 +1129,28 @@ class DiscoveryServer:
         self._stop_tuner_process_locked(state)
 
         pid_channel_id, pid_rf = self._select_channel_for_filter_pids(state)
+        if self._should_hold_scan_psip_only(state):
+            inferred_rf = self._representative_rf_for_filter(state) or state.get("rf")
+            if inferred_rf:
+                state["channel_id"] = inferred_rf.get("channel_id")
+                state["rf"] = inferred_rf
+                self._refresh_tuner_status(tuner_idx)
+                self._start_psip_sender_locked(state, stream_target)
+            state["target"] = target
+            state["target_norm"] = ffmpeg_target
+            state["stream_rf_key"] = self._rf_stream_key(state.get("rf") or {})
+            logger.info(
+                "Holding tuner%s scan target %s on PSIP only until WMC requests a program number",
+                tuner_idx,
+                target,
+            )
+            return
         if pid_channel_id and pid_rf:
             channel_id = pid_channel_id
             state["rf"] = pid_rf
         else:
-            if self._filter_requires_specific_program(state):
-                inferred_rf = self._representative_rf_for_filter(state)
+            if self._should_defer_stream_for_program_selection(state):
+                inferred_rf = self._representative_rf_for_filter(state) or state.get("rf")
                 if inferred_rf:
                     state["channel_id"] = inferred_rf.get("channel_id")
                     state["rf"] = inferred_rf
@@ -1484,6 +1518,56 @@ class DiscoveryServer:
         # it has committed to one program. Starting the first channel here hijacks
         # playback; wait for a later filter update with a specific program instead.
         return not av_matches and len(pmt_matches) > 1
+
+    def _should_defer_stream_for_program_selection(self, state: Dict) -> bool:
+        if self._program_requests_specific_program(state.get("program")):
+            return False
+        if self._select_channel_for_filter_pids(state)[0] and not self._should_hold_scan_psip_only(state):
+            return False
+
+        current_rf = state.get("rf") or {}
+        if not current_rf:
+            return False
+
+        if not self._is_scan_like_tune(state.get("channel")):
+            return False
+
+        filter_text = str(state.get("filter") or "").strip().lower()
+        if not filter_text or filter_text in ("none", "bypass", "r"):
+            return True
+        if self._filter_requires_specific_program(state):
+            return True
+
+        av_matches, pmt_matches, requested_count = self._filter_match_candidates(state)
+        if requested_count == 0:
+            return True
+
+        current_physical = int(current_rf.get("physical") or 0)
+        current_matches = [
+            rf for rf in av_matches + pmt_matches
+            if int(rf.get("physical") or 0) == current_physical
+        ]
+        return len(current_matches) != 1
+
+    def _should_hold_scan_psip_only(self, state: Dict) -> bool:
+        if self._program_requests_specific_program(state.get("program")):
+            return False
+        if not self._is_scan_like_tune(state.get("channel")):
+            return False
+        current_rf = state.get("rf") or {}
+        if not current_rf:
+            return False
+        physical = int(current_rf.get("physical") or 0)
+        if physical <= 0:
+            return False
+        # During TV setup, Vista probes program 0 and then tests individual PMT/AV
+        # PIDs. Starting a real single-program stream here makes WMC keep only that
+        # one subchannel. Keep sending the full RF PSIP until it selects a program.
+        return len([rf for rf in self._rf_channels if int(rf.get("physical") or 0) == physical]) > 1
+
+    def _is_scan_like_tune(self, channel_value: object) -> bool:
+        channel_text = str(channel_value or "").lower()
+        return "auto" in channel_text or "8vsb" in channel_text or "us-bcast" in channel_text
 
     def _representative_rf_for_filter(self, state: Dict) -> Optional[Dict]:
         av_matches, pmt_matches, requested_count = self._filter_match_candidates(state)
