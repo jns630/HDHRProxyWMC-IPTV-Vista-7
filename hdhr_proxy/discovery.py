@@ -2144,6 +2144,21 @@ class DiscoveryServer:
         short_name = name.encode("utf-16-be")[:14].ljust(14, b"\x00")
         major = int(rf.get("major") or rf.get("physical") or 2) & 0x3FF
         minor = int(rf.get("minor") or 1) & 0x3FF
+        video_pid = int(rf.get("video_pid") or 0x41) & 0x1FFF
+        audio_pid = int(rf.get("audio_pid") or 0x51) & 0x1FFF
+        pcr_pid = video_pid
+        video_stream_type = self._mpegts_video_stream_type()
+        service_location = (
+            bytes([0xA1, 15])
+            + (0xE000 | pcr_pid).to_bytes(2, "big")
+            + bytes([2])
+            + bytes([video_stream_type])
+            + (0xE000 | video_pid).to_bytes(2, "big")
+            + b"eng"
+            + bytes([0x81])
+            + (0xE000 | audio_pid).to_bytes(2, "big")
+            + b"eng"
+        )
         channel_numbers = 0xF00000 | (major << 10) | minor
         service_flags = (
             (0 << 14)  # ETM_location
@@ -2164,7 +2179,8 @@ class DiscoveryServer:
             + int(rf.get("program") or ATSC_PROGRAM_NUMBER).to_bytes(2, "big")
             + service_flags.to_bytes(2, "big")
             + int(major * 100 + minor).to_bytes(2, "big")
-            + (0xFC00).to_bytes(2, "big")  # reserved + descriptors_length=0
+            + (0xFC00 | len(service_location)).to_bytes(2, "big")
+            + service_location
         )
 
     def _make_mgt_section(self, tvct_bytes: int) -> bytes:
