@@ -304,7 +304,7 @@ def build_lineup(
         low_freq = frequency - 3000000
         high_freq = frequency + 3000000
         pmt_pid, video_pid, audio_pid = _mpegts_pids_for_program(program_number)
-        scanned_call_sign = _atsc_scanned_call_sign(ch.name)
+        scanned_call_sign = _atsc_scanned_call_sign(physical_channel, virtual_minor)
         program_pids = f"0,16,17,{pmt_pid},{video_pid},{audio_pid}"
         program_table = (
             f"[{program_number}:{pmt_pid}:{scanned_call_sign}:{program_pids}]"
@@ -416,5 +416,5 @@ def _safe_program_name(name: str) -> str:
     return clean.strip("-")[:32] or "VirtualHD"
 
 
-def _atsc_scanned_call_sign(name: str) -> str:
-    return _safe_program_name(name)[:7]
+def _atsc_scanned_call_sign(physical_channel: int, virtual_minor: int) -> str:
+    return "H%02d%02d" % (int(physical_channel), int(virtual_minor))
