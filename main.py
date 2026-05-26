@@ -318,6 +318,7 @@ def run_proxy(cfg: Config):
         channel_mapping=cfg.channel_mapping,
         tuner_count=cfg.tuner_count,
         max_physical_channel=cfg.get("max_physical_channel", 69),
+        programs_per_physical=20 if getattr(cfg, "force_vista_mode", False) else cfg.get("programs_per_physical"),
     )
     xmltv_data = load_xmltv(cfg.xmltv_file, cfg.xmltv_url, channel_map)
     generated_mxf_path = None

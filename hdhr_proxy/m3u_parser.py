@@ -281,15 +281,24 @@ def build_lineup(
     channel_mapping: Optional[Dict[str, str]] = None,
     tuner_count: int = 2,
     max_physical_channel: int = US_BCAST_LAST_PHYSICAL_CHANNEL,
+    programs_per_physical: Optional[int] = None,
 ) -> Tuple[List[Dict], Dict[str, M3UChannel]]:
     lineup = []
     ch_map: Dict[str, M3UChannel] = {}
     mapping = channel_mapping or {}
-    physical_count = _physical_channel_count(max_physical_channel)
-    physicals_used = min(len(channels), physical_count) if channels else 0
-    max_programs_per_physical = _max_programs_per_physical_for_lineup_size(len(channels), max_physical_channel)
+    fixed_programs_per_physical = _normalize_programs_per_physical(programs_per_physical)
+    if fixed_programs_per_physical:
+        physicals_used = _physical_channels_used_for_lineup_size(len(channels), fixed_programs_per_physical)
+        max_programs_per_physical = fixed_programs_per_physical
+        layout_mode = "fixed"
+    else:
+        physical_count = _physical_channel_count(max_physical_channel)
+        physicals_used = min(len(channels), physical_count) if channels else 0
+        max_programs_per_physical = _max_programs_per_physical_for_lineup_size(len(channels), max_physical_channel)
+        layout_mode = "spread"
     logger.info(
-        "Adaptive virtual RF layout: %s parsed channels -> up to %s programs/RF across %s physical channels up to RF %s",
+        "Adaptive virtual RF layout (%s): %s parsed channels -> up to %s programs/RF across %s physical channels up to RF %s",
+        layout_mode,
         len(channels),
         max_programs_per_physical,
         physicals_used,
@@ -297,7 +306,11 @@ def build_lineup(
     )
 
     for i, ch in enumerate(channels, start=1):
-        physical_channel, virtual_minor = _virtual_rf_assignment_for_index(i, len(channels), max_physical_channel)
+        if fixed_programs_per_physical:
+            physical_channel = _physical_channel_for_index(i, fixed_programs_per_physical, max_physical_channel)
+            virtual_minor = _virtual_minor_for_index(i, fixed_programs_per_physical)
+        else:
+            physical_channel, virtual_minor = _virtual_rf_assignment_for_index(i, len(channels), max_physical_channel)
         program_number = VIRTUAL_FIRST_PROGRAM_NUMBER + virtual_minor - 1
         guide_number = ch.tvg_chno or mapping.get(ch.name, "") or f"{physical_channel}.{virtual_minor}"
         frequency = _us_bcast_frequency_for_physical_channel(physical_channel)
@@ -362,6 +375,18 @@ def _physical_channels_used_for_lineup_size(channel_count: int, programs_per_phy
     if channel_count <= 0:
         return 1
     return (channel_count + max(1, programs_per_physical) - 1) // max(1, programs_per_physical)
+
+
+def _normalize_programs_per_physical(value: Optional[int]) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError):
+        return None
+    if normalized <= 0:
+        return None
+    return min(normalized, 255 - VIRTUAL_FIRST_PROGRAM_NUMBER)
 
 
 def _max_programs_per_physical_for_lineup_size(
