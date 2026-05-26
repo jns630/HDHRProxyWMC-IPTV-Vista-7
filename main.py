@@ -12,6 +12,7 @@ Usage:
     python main.py stop              # Stop service
 """
 import argparse
+import ctypes
 import json
 import logging
 import os
@@ -40,6 +41,27 @@ from hdhr_proxy.mxf import (
 from hdhr_proxy.xmltv import load_xmltv
 
 logger = logging.getLogger("main")
+_INSTANCE_GUARDS = []
+
+
+def acquire_single_instance_guard(cfg: Config):
+    if platform.system() != "Windows":
+        return
+
+    mutex_name = "Local\\HDHRProxyWMC-IPTV-port-%s" % int(cfg.http_port)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle = kernel32.CreateMutexW(None, True, mutex_name)
+    if not handle:
+        logger.warning("Could not create single-instance guard for %s.", mutex_name)
+        return
+    if ctypes.get_last_error() == 183:
+        logger.error(
+            "Another HDHR proxy is already running on HTTP port %s. "
+            "Stop the existing proxy before starting another scan instance.",
+            cfg.http_port,
+        )
+        sys.exit(1)
+    _INSTANCE_GUARDS.append(handle)
 
 
 def configure_logging(log_dir: str = "."):
@@ -252,6 +274,7 @@ def resolve_listen_ip(cfg: Config) -> str:
 
 
 def run_proxy(cfg: Config):
+    acquire_single_instance_guard(cfg)
     apply_wmc_video_codec_policy(cfg)
 
     normalized_device_id = normalize_device_id(cfg.device_id)
