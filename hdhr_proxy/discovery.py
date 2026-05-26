@@ -2018,9 +2018,8 @@ class DiscoveryServer:
         match = re.match(r"^(?:udp|rtp)://([0-9.]+):(\d+)", target)
         if not match:
             return
-        psip_packets = self._build_atsc_psip_packets(rf)
-        null_packet = bytes([0x47, 0x1F, 0xFF, 0x10]) + (b"\xFF" * 184)
-        ts_packets = psip_packets + [null_packet] * 8
+        psip_sections = self._build_atsc_psip_sections(rf)
+        continuity_by_pid: Dict[int, int] = {}
         is_rtp = target.lower().startswith("rtp://")
         addr = (match.group(1), int(match.group(2)))
         sequence = 0
@@ -2033,6 +2032,7 @@ class DiscoveryServer:
                     warmup = time.monotonic() - started_at < 1.25
                     repeats = 4 if warmup else 1
                     for _ in range(repeats):
+                        ts_packets = self._packetize_atsc_psip_sections(psip_sections, continuity_by_pid)
                         for offset in range(0, len(ts_packets), 7):
                             payload = b"".join(ts_packets[offset:offset + 7])
                             datagram = self._wrap_rtp_mpegts(payload, sequence, timestamp, ssrc) if is_rtp else payload
@@ -2053,16 +2053,38 @@ class DiscoveryServer:
         return header + payload
 
     def _build_atsc_psip_packets(self, rf: Dict) -> List[bytes]:
+        continuity_by_pid: Dict[int, int] = {}
+        return self._packetize_atsc_psip_sections(self._build_atsc_psip_sections(rf), continuity_by_pid)
+
+    def _build_atsc_psip_sections(self, rf: Dict) -> List[Tuple[int, bytes]]:
         rf_group = self._rf_group_for_physical(rf)
         pat_section = self._make_pat_section(rf_group)
         tvct_section = self._make_tvct_section(rf_group)
         mgt_section = self._make_mgt_section(len(tvct_section))
-        packets = self._packetize_psi_section(0x0000, pat_section, 0)
+        sections = [(0x0000, pat_section)]
         for item in rf_group:
             pmt_section = self._make_pmt_section(item)
-            packets.extend(self._packetize_psi_section(int(item.get("pmt_pid") or 0x31), pmt_section, 0))
-        packets.extend(self._packetize_psi_section(0x1FFB, mgt_section, 0))
-        packets.extend(self._packetize_psi_section(0x1FFB, tvct_section, 1))
+            sections.append((int(item.get("pmt_pid") or 0x31), pmt_section))
+        sections.append((0x1FFB, mgt_section))
+        sections.append((0x1FFB, tvct_section))
+        return sections
+
+    def _packetize_atsc_psip_sections(
+        self,
+        sections: List[Tuple[int, bytes]],
+        continuity_by_pid: Dict[int, int],
+    ) -> List[bytes]:
+        packets = []
+        for pid, section in sections:
+            continuity = continuity_by_pid.get(pid, 0)
+            section_packets, continuity = self._packetize_psi_section(pid, section, continuity)
+            continuity_by_pid[pid] = continuity
+            packets.extend(section_packets)
+        null_continuity = continuity_by_pid.get(0x1FFF, 0)
+        for _ in range(8):
+            packets.append(bytes([0x47, 0x1F, 0xFF, 0x10 | (null_continuity & 0x0F)]) + (b"\xFF" * 184))
+            null_continuity = (null_continuity + 1) & 0x0F
+        continuity_by_pid[0x1FFF] = null_continuity
         return packets
 
     def _rf_group_for_physical(self, rf: Dict) -> List[Dict]:
@@ -2174,7 +2196,7 @@ class DiscoveryServer:
         section = header + body
         return section + self._mpeg_crc32(section).to_bytes(4, "big")
 
-    def _packetize_psi_section(self, pid: int, section: bytes, continuity: int) -> List[bytes]:
+    def _packetize_psi_section(self, pid: int, section: bytes, continuity: int) -> Tuple[List[bytes], int]:
         packets = []
         data = b"\x00" + section
         first = True
@@ -2190,7 +2212,7 @@ class DiscoveryServer:
             packets.append(header + payload.ljust(184, b"\xFF"))
             first = False
             continuity = (continuity + 1) & 0x0F
-        return packets
+        return packets, continuity
 
     def _mpeg_crc32(self, data: bytes) -> int:
         crc = 0xFFFFFFFF
