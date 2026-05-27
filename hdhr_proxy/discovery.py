@@ -1310,7 +1310,6 @@ class DiscoveryServer:
         audio_map = "0:a:0?"
         video_map = "0:v:0?"
         if audio_url and self._hls_audio_playlist_may_include_video(audio_url):
-            video_map = "0:v:1?"
             if self._is_descriptive_hls_audio_url(audio_url):
                 audio_map = "0:a:1?"
         lines.append(f"#HDHR-PROXY-VIDEO-MAP:{video_map}")
