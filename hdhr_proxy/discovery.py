@@ -993,7 +993,7 @@ class DiscoveryServer:
         # AC3 defaults to 192k; give the MPEG-TS mux enough headroom for audio,
         # PSI tables, PCR timing, encoder bursts, and null packets. Lower mux
         # rates caused "dts < pcr" and WMC decoder stalls on live HLS sources.
-        return max(video_bps + 4000000, 8000000)
+        return max(video_bps + 4000000, 19392658)
 
     def _format_streaminfo(self, rf: Dict) -> str:
         program = int(rf.get("program") or ATSC_PROGRAM_NUMBER)
@@ -1296,6 +1296,10 @@ class DiscoveryServer:
             audio_master_text = nested_raw
             audio_base_url = nested_base_url
         audio_url = self._select_hls_audio_url(audio_master_text, audio_base_url, selected_attrs)
+        # The selected Pluto video playlist already carries usable audio. Adding a
+        # separate EXT-X-MEDIA audio rendition makes ffmpeg open extra low-bandwidth
+        # side streams and can cause WMC-visible stutter.
+        audio_url = None
         bandwidth = selected_attrs.get("average-bandwidth") or selected_attrs.get("bandwidth") or "3000000"
         resolution = selected_attrs.get("resolution") or "unknown"
 
@@ -1309,9 +1313,6 @@ class DiscoveryServer:
             )
         audio_map = "0:a:0?"
         video_map = "0:v:0?"
-        if audio_url and self._hls_audio_playlist_may_include_video(audio_url):
-            if self._is_descriptive_hls_audio_url(audio_url):
-                audio_map = "0:a:1?"
         lines.append(f"#HDHR-PROXY-VIDEO-MAP:{video_map}")
         lines.append(f"#HDHR-PROXY-AUDIO-MAP:{audio_map}")
         stream_inf = f"#EXT-X-STREAM-INF:PROGRAM-ID=1,BANDWIDTH={bandwidth}"
