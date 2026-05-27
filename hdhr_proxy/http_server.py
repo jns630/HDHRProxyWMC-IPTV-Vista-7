@@ -2,6 +2,8 @@ import json
 import logging
 import threading
 import xml.sax.saxutils
+import hashlib
+import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Callable, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
@@ -57,6 +59,8 @@ class HDHRRequestHandler(BaseHTTPRequestHandler):
     on_stream_start: Optional[Callable] = None
     on_stream_stop: Optional[Callable] = None
     active_streams: Dict[str, threading.Event] = {}
+    logo_urls: Dict[str, str] = {}
+    logo_cache: Dict[str, tuple] = {}
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -81,6 +85,8 @@ class HDHRRequestHandler(BaseHTTPRequestHandler):
         elif path.startswith("/stream/"):
             channel_id = path[len("/stream/") :]
             self._handle_stream(channel_id, query)
+        elif path.startswith("/logos/"):
+            self._handle_logo(path[len("/logos/") :])
         elif path in ("/", ""):
             self._handle_root()
         else:
@@ -154,6 +160,41 @@ class HDHRRequestHandler(BaseHTTPRequestHandler):
             self.send_error(404, "XMLTV not configured")
             return
         self._send_xml(self.xmltv_data.filtered_xml)
+
+    def _handle_logo(self, logo_name: str):
+        logo_id = logo_name.rsplit(".", 1)[0]
+        remote_url = self.logo_urls.get(logo_id)
+        if not remote_url:
+            self.send_error(404, "Logo not found")
+            return
+
+        cached = self.logo_cache.get(logo_id)
+        if cached:
+            content_type, data = cached
+        else:
+            try:
+                req = urllib.request.Request(
+                    remote_url,
+                    headers={
+                        "User-Agent": "Mozilla/5.0",
+                        "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+                    },
+                )
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    content_type = resp.headers.get("Content-Type") or _logo_content_type(remote_url)
+                    data = resp.read(2 * 1024 * 1024)
+            except Exception as exc:
+                logger.warning("Unable to fetch channel logo %s from %s: %s", logo_id, remote_url, exc)
+                self.send_error(502, "Unable to fetch logo")
+                return
+            self.logo_cache[logo_id] = (content_type, data)
+
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "public, max-age=86400")
+        self.end_headers()
+        self.wfile.write(data)
 
     def _handle_lineup_status(self):
         body = json.dumps(
@@ -306,6 +347,8 @@ class HDHRHTTPServer:
         HDHRRequestHandler.config = self.config
         HDHRRequestHandler.xmltv_data = self.xmltv_data
         HDHRRequestHandler.active_streams = {}
+        HDHRRequestHandler.logo_urls = _build_logo_url_map(self.channel_map)
+        HDHRRequestHandler.logo_cache = {}
 
         self._server = HTTPServer((self.host, self.port), HDHRRequestHandler)
         self._thread = threading.Thread(
@@ -320,3 +363,30 @@ class HDHRHTTPServer:
         if self._server:
             self._server.shutdown()
             logger.info("HTTP server stopped")
+
+
+def _build_logo_url_map(channel_map: Dict) -> Dict[str, str]:
+    logos: Dict[str, str] = {}
+    for channel in channel_map.values():
+        logo_url = (getattr(channel, "tvg_logo", "") or "").strip()
+        if not logo_url:
+            continue
+        logo_id = _logo_image_id(logo_url)
+        logos.setdefault(logo_id, logo_url)
+    return logos
+
+
+def _logo_image_id(image_url: str) -> str:
+    digest = hashlib.md5(image_url.encode("utf-8")).hexdigest()
+    return "i" + str(1 + (int(digest[:12], 16) % 2147483000))
+
+
+def _logo_content_type(url: str) -> str:
+    path = urlparse(url).path.lower()
+    if path.endswith(".jpg") or path.endswith(".jpeg"):
+        return "image/jpeg"
+    if path.endswith(".webp"):
+        return "image/webp"
+    if path.endswith(".gif"):
+        return "image/gif"
+    return "image/png"

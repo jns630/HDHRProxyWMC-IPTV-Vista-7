@@ -6,6 +6,7 @@ import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 from .m3u_parser import M3UChannel
 from .xmltv import resolve_channel_xmltv_ids
@@ -236,6 +237,16 @@ def _build_channel_metadata(
         if not guide_number:
             continue
         major, minor = _split_guide_number(guide_number)
+        # In Vista scan mode the XMLTV/M3U guide number can be a provider number
+        # like 60, while WMC scanned the virtual broadcast channel as 15.2.
+        # Match the MXF to the scanned RF/subchannel so guide data lands on the
+        # channel Windows Media Center actually created.
+        if item.get("VirtualMajor") is not None and item.get("VirtualMinor") is not None:
+            try:
+                major = int(item.get("VirtualMajor"))
+                minor = int(item.get("VirtualMinor"))
+            except (TypeError, ValueError):
+                pass
         channel = channel_map.get(guide_number)
         tvg_id = (getattr(channel, "tvg_id", "") or "").strip()
         if not tvg_id:
@@ -246,6 +257,8 @@ def _build_channel_metadata(
         fallback_counter += 1
         guide_name = str(item.get("GuideName") or getattr(channel, "name", guide_number))
         scanned_call_sign = _lineup_scanned_call_sign(item, guide_name)
+        logo_url = (getattr(channel, "tvg_logo", "") or "").strip()
+        logo_image = _guide_image_id(logo_url) if logo_url else ""
         meta_by_service[service_id] = {
             "guide_number": guide_number,
             "major": major,
@@ -257,6 +270,9 @@ def _build_channel_metadata(
             "service_name": guide_name,
             "call_sign": scanned_call_sign,
             "category_hints": _channel_category_hints(channel, guide_name),
+            "logo_url": logo_url,
+            "logo_image": logo_image,
+            "logo_image_url": _logo_proxy_url(item, logo_image, logo_url) if logo_image else "",
         }
     return meta_by_service
 
@@ -309,6 +325,7 @@ def _collect_programmes(xmltv_xml: str, channel_meta: Dict[str, Dict]) -> Dict[s
             episode_title = _episode_title_from_description(description)
         elif is_news and not episode_title and title and title != service_name:
             episode_title = title
+        display_title = _series_display_title(service_name, title, episode_title, is_series)
         keywords, genre_flags = _program_keywords(categories, is_movie, is_series, is_news)
         icon_url = _child_attr(programme, "icon", "src")
         rating, rating_kind = _extract_rating(programme)
@@ -323,7 +340,7 @@ def _collect_programmes(xmltv_xml: str, channel_meta: Dict[str, Dict]) -> Dict[s
             "uid": "!Program!" + hashlib.md5(
                 f"{channel_id}|{programme.attrib.get('start')}|{title}|{episode_title or ''}".encode("utf-8")
             ).hexdigest(),
-            "title": title,
+            "title": display_title,
             "episode_title": episode_title,
             "description": description,
             "short_description": _short_description(description or episode_title or title),
@@ -397,7 +414,7 @@ def _build_mxf_root(
     })
 
     with_el = ET.SubElement(root, ns("With"), {"provider": "provider1"})
-    _append_rovi_metadata(with_el, service_programmes, namespaced=True)
+    _append_rovi_metadata(with_el, service_programmes, channel_meta, namespaced=True)
     ET.SubElement(with_el, ns("People"))
     ET.SubElement(with_el, ns("SeriesInfos"))
     ET.SubElement(with_el, ns("Seasons"))
@@ -412,12 +429,15 @@ def _build_mxf_root(
 
     services_el = ET.SubElement(with_el, ns("Services"))
     for meta in sorted(channel_meta.values(), key=lambda m: (m["major"], m["minor"])):
-        ET.SubElement(services_el, ns("Service"), {
+        service_attrs = {
             "id": meta["service_id"],
             "uid": f"!Service!{meta['call_sign']}",
             "name": meta["service_name"],
             "callSign": meta["call_sign"],
-        })
+        }
+        if meta.get("logo_image"):
+            service_attrs["logoImage"] = meta["logo_image"]
+        ET.SubElement(services_el, ns("Service"), service_attrs)
 
     for meta in sorted(channel_meta.values(), key=lambda m: (m["major"], m["minor"])):
         schedule_entries_el = ET.SubElement(with_el, ns("ScheduleEntries"), {
@@ -507,7 +527,7 @@ def _build_vista_mxf_root(
     })
 
     with_el = ET.SubElement(root, "With", {"provider": "provider1"})
-    _append_rovi_metadata(with_el, service_programmes, namespaced=False)
+    _append_rovi_metadata(with_el, service_programmes, channel_meta, namespaced=False)
     ET.SubElement(with_el, "People")
     ET.SubElement(with_el, "SeriesInfos")
     ET.SubElement(with_el, "Seasons")
@@ -535,7 +555,7 @@ def _build_vista_mxf_root(
             "uid": f"!Service!EPG123_{meta['station_id']}" if epg123_mode else f"!Service!HDHRProxy_{meta['call_sign']}",
             "name": meta["service_name"],
             "callSign": meta["call_sign"],
-            "logoImage": "",
+            "logoImage": meta.get("logo_image") or "",
         }
         if not epg123_mode:
             service_attrs["stationId"] = meta["source_tvg_id"]
@@ -607,7 +627,12 @@ def _build_vista_mxf_root(
     return root
 
 
-def _append_rovi_metadata(with_el: ET.Element, service_programmes: Dict[str, List[Dict]], namespaced: bool) -> None:
+def _append_rovi_metadata(
+    with_el: ET.Element,
+    service_programmes: Dict[str, List[Dict]],
+    channel_meta: Dict[str, Dict],
+    namespaced: bool,
+) -> None:
     tag = ns if namespaced else (lambda value: value)
 
     keywords_el = ET.SubElement(with_el, tag("Keywords"))
@@ -626,15 +651,23 @@ def _append_rovi_metadata(with_el: ET.Element, service_programmes: Dict[str, Lis
         })
 
     guide_images_el = ET.SubElement(with_el, tag("GuideImages"))
-    for image_id, image_url in _guide_images_for_programmes(service_programmes):
+    for image_id, image_url in _guide_images_for_programmes(service_programmes, channel_meta):
         ET.SubElement(guide_images_el, tag("GuideImage"), {
             "id": image_id,
             "imageUrl": image_url,
         })
 
 
-def _guide_images_for_programmes(service_programmes: Dict[str, List[Dict]]) -> List[Tuple[str, str]]:
+def _guide_images_for_programmes(
+    service_programmes: Dict[str, List[Dict]],
+    channel_meta: Dict[str, Dict],
+) -> List[Tuple[str, str]]:
     images: Dict[str, str] = {}
+    for meta in channel_meta.values():
+        image_id = meta.get("logo_image")
+        image_url = meta.get("logo_image_url") or meta.get("logo_url")
+        if image_id and image_url:
+            images.setdefault(image_id, image_url)
     for programmes in service_programmes.values():
         for program in programmes:
             image_id = program.get("guide_image")
@@ -673,6 +706,8 @@ def _program_mxf_attrs(program: Dict, vista_mode: bool) -> Dict[str, str]:
         attrs["isMovie"] = "true"
     elif program.get("is_series"):
         attrs["isSeries"] = "true"
+    if program.get("is_news"):
+        attrs["isNews"] = "true"
     if program.get("half_stars"):
         attrs["halfStars"] = program["half_stars"]
     rating = program.get("rating")
@@ -829,6 +864,24 @@ def _guide_image_id(image_url: str) -> str:
     return "i" + str(1 + (int(digest[:12], 16) % 2147483000))
 
 
+def _logo_proxy_url(item: Dict, logo_image: str, logo_url: str) -> str:
+    base_url = _lineup_item_base_url(item)
+    if not base_url:
+        return logo_url
+    ext = os.path.splitext(urlparse(logo_url).path)[1].lower()
+    if ext not in (".png", ".jpg", ".jpeg", ".webp", ".gif"):
+        ext = ".png"
+    return f"{base_url}/logos/{logo_image}{ext}"
+
+
+def _lineup_item_base_url(item: Dict) -> str:
+    stream_url = str(item.get("URL") or "").strip()
+    parsed = urlparse(stream_url)
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
 def _is_movie_program(categories: List[str]) -> bool:
     lowered = [_normalize_category(category) for category in categories]
     return any(
@@ -875,6 +928,19 @@ def _episode_title_from_description(description: Optional[str]) -> Optional[str]
         return None
     sentence = re.split(r"(?<=[.!?])\s+", text, 1)[0].strip()
     return _short_description(sentence or text, limit=90)
+
+
+def _series_display_title(service_name: str, title: str, episode_title: Optional[str], is_series: bool) -> str:
+    if not is_series or not episode_title:
+        return title
+    normalized_title = _normalize_category(title)
+    normalized_service = _normalize_category(service_name)
+    normalized_episode = _normalize_category(episode_title)
+    if normalized_episode in ("", normalized_title, normalized_service):
+        return title
+    base_title = service_name if normalized_title == normalized_service else title
+    combined = f"{base_title}: {episode_title}"
+    return _short_description(combined, limit=120) or title
 
 
 def _program_keywords(categories: List[str], is_movie: bool, is_series: bool, is_news: bool = False) -> Tuple[List[str], List[str]]:
