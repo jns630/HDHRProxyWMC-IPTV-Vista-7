@@ -1130,7 +1130,7 @@ class DiscoveryServer:
         self._stop_tuner_process_locked(state)
 
         pid_channel_id, pid_rf = self._select_channel_for_filter_pids(state)
-        if self._should_hold_scan_psip_only(state):
+        if self._should_hold_scan_psip_only(state) and not pid_channel_id:
             inferred_rf = self._representative_rf_for_filter(state) or state.get("rf")
             if inferred_rf:
                 state["channel_id"] = inferred_rf.get("channel_id")
