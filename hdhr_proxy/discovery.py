@@ -1754,9 +1754,13 @@ class DiscoveryServer:
         packet_size = 1316
         packets_per_burst = 4
         burst_size = packet_size * packets_per_burst
-        # Keep the startup buffer modest so WMC sees bytes quickly on retunes.
-        buffer_target_bytes = min(max(burst_size * 3, transport_bps // 24), burst_size * 10)
-        buffer_max_bursts = max(192, (transport_bps * 2) // 8 // burst_size)
+        # WMC recording is more sensitive to short upstream HLS stalls than to a
+        # little startup latency. Keep a small reserve so Pluto ad/playlist
+        # transitions do not immediately show up as playback hiccups.
+        prebuffer_seconds = 1.25 if use_rtp else 0.35
+        max_buffer_seconds = 8.0 if use_rtp else 3.0
+        buffer_target_bytes = max(burst_size * 8, int((transport_bps / 8) * prebuffer_seconds))
+        buffer_max_bursts = max(192, int((transport_bps / 8) * max_buffer_seconds) // burst_size)
         burst_queue: "queue.Queue[Optional[bytes]]" = queue.Queue(maxsize=buffer_max_bursts)
         bytes_sent = 0
         started_at = time.monotonic()
@@ -1797,7 +1801,7 @@ class DiscoveryServer:
 
             prebuffered: List[bytes] = []
             buffered_bytes = 0
-            prebuffer_deadline = time.monotonic() + 0.22
+            prebuffer_deadline = time.monotonic() + prebuffer_seconds
             while not stop_event.is_set() and buffered_bytes < buffer_target_bytes and time.monotonic() < prebuffer_deadline:
                 try:
                     burst = burst_queue.get(timeout=0.1)
@@ -2256,7 +2260,6 @@ class DiscoveryServer:
             "-loglevel", "info",
             "-nostdin",
             "-fflags", "+genpts+discardcorrupt",
-            "-flags", "low_delay",
             "-analyzeduration", FFMPEG_ANALYZE_US,
             "-probesize", FFMPEG_PROBE_BYTES,
         ]
@@ -2315,9 +2318,9 @@ class DiscoveryServer:
             "-metadata", "service_provider=VirtualHDHR",
             "-metadata", f"service_name={service_name}",
             "-muxrate", str(transport_bps),
-            "-muxpreload", "0.02",
-            "-muxdelay", "0.02",
-            "-flush_packets", "1",
+            "-muxpreload", "0.25",
+            "-muxdelay", "0.25",
+            "-flush_packets", "0",
             "-pat_period", "0.10",
             "pipe:1",
         ]
