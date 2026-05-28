@@ -1474,11 +1474,41 @@ class DiscoveryServer:
             return source_url
 
         playback_url = urllib.parse.urljoin(base_url, selected)
+        if self._hls_master_has_separate_audio(raw, variants, selected):
+            logger.info("Keeping original HLS master because selected variant has separate audio")
+            self._hls_variant_cache[source_url] = (source_url, now + 300)
+            return source_url
         if self._should_keep_original_hls_url(source_url, playback_url):
             return source_url
         self._hls_variant_cache[source_url] = (playback_url, now + 300)
         logger.info("Using HLS media variant for playback: %s", playback_url)
         return playback_url
+
+    def _hls_master_has_separate_audio(
+        self,
+        master_text: str,
+        variants: List[Tuple[str, Dict[str, str]]],
+        selected_uri: str,
+    ) -> bool:
+        audio_groups = set()
+        for line in master_text.splitlines():
+            line = line.strip()
+            if not line.upper().startswith("#EXT-X-MEDIA:"):
+                continue
+            attrs = self._parse_hls_attribute_list(line.split(":", 1)[1])
+            if (attrs.get("type") or "").upper() == "AUDIO" and attrs.get("uri"):
+                group_id = attrs.get("group-id")
+                if group_id:
+                    audio_groups.add(group_id)
+        if not audio_groups:
+            return False
+
+        for uri, attrs in variants:
+            if uri != selected_uri:
+                continue
+            group_id = attrs.get("audio")
+            return not group_id or group_id in audio_groups
+        return False
 
     def _rf_stream_key(self, rf: Dict) -> Tuple[int, int]:
         return int(rf.get("physical") or 0), int(rf.get("program") or 0)
