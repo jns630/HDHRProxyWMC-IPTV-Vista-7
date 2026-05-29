@@ -1296,6 +1296,9 @@ class DiscoveryServer:
             audio_master_text = nested_raw
             audio_base_url = nested_base_url
         audio_url = self._select_hls_audio_url(audio_master_text, audio_base_url, selected_attrs)
+        subtitle_url = self._select_hls_subtitle_url(raw, base_url, selected_attrs)
+        if not subtitle_url:
+            subtitle_url = self._select_hls_subtitle_url(audio_master_text, audio_base_url, selected_attrs)
         # The selected Pluto video playlist already carries usable audio. Adding a
         # separate EXT-X-MEDIA audio rendition makes ffmpeg open extra low-bandwidth
         # side streams and can cause WMC-visible stutter.
@@ -1311,13 +1314,21 @@ class DiscoveryServer:
             lines.append(
                 f'#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",LANGUAGE="en",NAME="English",AUTOSELECT=YES,DEFAULT=YES,CHANNELS="2",URI="{audio_url}"'
             )
+        if subtitle_url:
+            lines.append(
+                f'#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",LANGUAGE="en",NAME="English",AUTOSELECT=YES,DEFAULT=YES,FORCED=NO,URI="{subtitle_url}"'
+            )
         audio_map = "0:a:0?"
         video_map = "0:v:0?"
         lines.append(f"#HDHR-PROXY-VIDEO-MAP:{video_map}")
         lines.append(f"#HDHR-PROXY-AUDIO-MAP:{audio_map}")
+        if subtitle_url:
+            lines.append("#HDHR-PROXY-SUBTITLE-BURN:1")
         stream_inf = f"#EXT-X-STREAM-INF:PROGRAM-ID=1,BANDWIDTH={bandwidth}"
         if audio_url:
             stream_inf += ',AUDIO="audio"'
+        if subtitle_url:
+            stream_inf += ',SUBTITLES="subs"'
         lines.extend([stream_inf, video_url, ""])
 
         fd, path = tempfile.mkstemp(prefix="hdhr_pluto_", suffix=".m3u8", text=True)
@@ -1326,12 +1337,13 @@ class DiscoveryServer:
             f.write("\n".join(lines))
         self._prepared_input_cache[source_url] = (path, now + 6)
         logger.info(
-            "Using local Pluto HLS master for playback: %s video=%s bandwidth=%s resolution=%s audio=%s",
+            "Using local Pluto HLS master for playback: %s video=%s bandwidth=%s resolution=%s audio=%s subtitles=%s",
             path,
             video_url,
             bandwidth,
             resolution,
             audio_url or "none",
+            subtitle_url or "none",
         )
         return path
 
@@ -1409,6 +1421,44 @@ class DiscoveryServer:
                 selected = max(fallback_entries, key=score)
         return urllib.parse.urljoin(base_url, selected["uri"])
 
+    def _select_hls_subtitle_url(self, master_text: str, base_url: str, selected_attrs: Dict[str, str]) -> Optional[str]:
+        group_id = (selected_attrs.get("subtitles") or "").strip()
+        if not group_id:
+            return None
+
+        matching_entries = []
+        fallback_entries = []
+        for line in master_text.splitlines():
+            line = line.strip()
+            if not line.upper().startswith("#EXT-X-MEDIA:"):
+                continue
+            attrs = self._parse_hls_attribute_list(line.split(":", 1)[1])
+            if (attrs.get("type") or "").upper() != "SUBTITLES":
+                continue
+            uri = attrs.get("uri")
+            if not uri:
+                continue
+            if (attrs.get("forced") or "").upper() == "YES":
+                fallback_entries.append(attrs)
+                continue
+            if attrs.get("group-id") == group_id:
+                matching_entries.append(attrs)
+
+        candidates = matching_entries or fallback_entries
+        if not candidates:
+            return None
+
+        def score(attrs: Dict[str, str]) -> Tuple[int, int, int]:
+            name = (attrs.get("name") or "").lower()
+            language = (attrs.get("language") or "").lower()
+            is_english = language in ("en", "eng") or "english" in name
+            is_default = (attrs.get("default") or "").upper() == "YES"
+            is_autoselect = (attrs.get("autoselect") or "").upper() == "YES"
+            return (1 if is_english else 0, 1 if is_default else 0, 1 if is_autoselect else 0)
+
+        selected = max(candidates, key=score)
+        return urllib.parse.urljoin(base_url, selected["uri"])
+
     def _hls_audio_playlist_may_include_video(self, audio_url: str) -> bool:
         lowered = (audio_url or "").lower()
         if self._is_descriptive_hls_audio_url(audio_url):
@@ -1478,6 +1528,10 @@ class DiscoveryServer:
             logger.info("Keeping original HLS master because selected variant has separate audio")
             self._hls_variant_cache[source_url] = (source_url, now + 300)
             return source_url
+        if self._hls_master_has_subtitles(raw, variants, selected):
+            logger.info("Keeping original HLS master because selected variant has subtitles")
+            self._hls_variant_cache[source_url] = (source_url, now + 300)
+            return source_url
         if self._should_keep_original_hls_url(source_url, playback_url):
             return source_url
         self._hls_variant_cache[source_url] = (playback_url, now + 300)
@@ -1508,6 +1562,32 @@ class DiscoveryServer:
                 continue
             group_id = attrs.get("audio")
             return not group_id or group_id in audio_groups
+        return False
+
+    def _hls_master_has_subtitles(
+        self,
+        master_text: str,
+        variants: List[Tuple[str, Dict[str, str]]],
+        selected_uri: str,
+    ) -> bool:
+        subtitle_groups = set()
+        for line in master_text.splitlines():
+            line = line.strip()
+            if not line.upper().startswith("#EXT-X-MEDIA:"):
+                continue
+            attrs = self._parse_hls_attribute_list(line.split(":", 1)[1])
+            if (attrs.get("type") or "").upper() == "SUBTITLES" and attrs.get("uri"):
+                group_id = attrs.get("group-id")
+                if group_id:
+                    subtitle_groups.add(group_id)
+        if not subtitle_groups:
+            return False
+
+        for uri, attrs in variants:
+            if uri != selected_uri:
+                continue
+            group_id = attrs.get("subtitles")
+            return bool(group_id and group_id in subtitle_groups)
         return False
 
     def _rf_stream_key(self, rf: Dict) -> Tuple[int, int]:
@@ -2325,13 +2405,17 @@ class DiscoveryServer:
         input_args.extend(["-i", source_url])
         video_map = self._local_hls_video_map(source_url)
         audio_map = self._local_hls_audio_map(source_url)
-        return input_args + [
+        subtitle_filter = self._hls_subtitle_burn_filter(source_url)
+        output_args = [
             "-map", video_map,
             "-map", audio_map,
             "-fps_mode", "cfr",
             "-dn",
             "-sn",
-        ] + self._video_encoder_args(effective_bitrate, self._uses_hls_quality_profile(source_url)) + [
+        ]
+        if subtitle_filter:
+            output_args.extend(["-vf", subtitle_filter])
+        return input_args + output_args + self._video_encoder_args(effective_bitrate, self._uses_hls_quality_profile(source_url)) + [
             "-c:a", "ac3",
             "-b:a", "192k",
             "-ar", "48000",
@@ -2465,6 +2549,55 @@ class DiscoveryServer:
         if match and match.group(1) in ("0:a:0?", "0:a:1?"):
             return match.group(1)
         return "0:a:0?"
+
+    def _hls_subtitle_burn_filter(self, source_url: str) -> Optional[str]:
+        if not self._hls_source_has_subtitles(source_url):
+            return None
+        escaped_source = self._escape_ffmpeg_filter_filename(source_url)
+        logger.info("Burning first HLS subtitle track into video for WMC playback")
+        return f"subtitles=filename='{escaped_source}':si=0"
+
+    def _hls_source_has_subtitles(self, source_url: str) -> bool:
+        parsed = urllib.parse.urlparse(source_url or "")
+        scheme = parsed.scheme.lower()
+        if scheme and scheme not in ("http", "https", "file") and not re.fullmatch(r"[a-z]", scheme):
+            return False
+
+        text = ""
+        if scheme in ("http", "https"):
+            if self._needs_pluto_headers(source_url):
+                return False
+            try:
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122 Safari/537.36",
+                    "Accept": "application/vnd.apple.mpegurl,application/x-mpegURL,*/*",
+                }
+                with urllib.request.urlopen(urllib.request.Request(source_url, headers=headers), timeout=5) as resp:
+                    text = resp.read(512 * 1024).decode("utf-8", errors="replace")
+            except Exception as exc:
+                logger.debug("Unable to inspect HLS subtitles for %s: %s", source_url, exc)
+                return False
+        else:
+            path = parsed.path if scheme == "file" else source_url
+            if not path or not os.path.isfile(path):
+                return False
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    text = f.read(512 * 1024)
+            except OSError:
+                return False
+
+        for line in text.splitlines():
+            line = line.strip()
+            if not line.upper().startswith("#EXT-X-MEDIA:"):
+                continue
+            attrs = self._parse_hls_attribute_list(line.split(":", 1)[1])
+            if (attrs.get("type") or "").upper() == "SUBTITLES" and attrs.get("uri"):
+                return True
+        return False
+
+    def _escape_ffmpeg_filter_filename(self, value: str) -> str:
+        return (value or "").replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
 
     def _resolve_ffmpeg_path(self, ffmpeg_path: str) -> str:
         if ffmpeg_path and os.path.isfile(ffmpeg_path):
