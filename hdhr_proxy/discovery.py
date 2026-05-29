@@ -1923,9 +1923,10 @@ class DiscoveryServer:
                 prebuffered.append(burst)
 
             next_send = time.perf_counter()
-            rtp_sequence = 0
+            rtp_seed = f"{tuner_idx}:{time.time():.6f}:{id(proc)}".encode("ascii", errors="ignore")
+            rtp_sequence = zlib.crc32(rtp_seed) & 0xFFFF
             rtp_timestamp = int(time.time() * 90000) & 0xFFFFFFFF
-            rtp_ssrc = (0x48444852 << 16 | tuner_idx) & 0xFFFFFFFF
+            rtp_ssrc = zlib.crc32(b"HDHR" + rtp_seed) & 0xFFFFFFFF
             while not stop_event.is_set():
                 if prebuffered:
                     burst = prebuffered.pop(0)
