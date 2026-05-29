@@ -6,8 +6,7 @@ import time
 import io
 import threading
 import re
-import os
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict
 
 from .m3u_parser import M3UParser
 
@@ -82,8 +81,6 @@ def _resolve_hls_source_url(source_url: str) -> str:
     if not selected:
         return source_url
     playback_url = urllib.parse.urljoin(base_url, selected)
-    if _hls_master_has_subtitles(raw, variants, selected):
-        return source_url
     if _should_keep_original_hls_url(source_url, playback_url):
         return source_url
     return playback_url
@@ -102,87 +99,6 @@ def _should_keep_original_hls_url(source_url: str, playback_url: str) -> bool:
     if "jmp2.uk" in source_host and playback_parts.query:
         return True
     return False
-
-
-def _parse_hls_attribute_list(text: str) -> Dict[str, str]:
-    attrs = {}
-    for key, value in re.findall(r'([A-Z0-9-]+)=("[^"]*"|[^,]*)', text, flags=re.IGNORECASE):
-        attrs[key.lower()] = value.strip().strip('"')
-    return attrs
-
-
-def _hls_master_has_subtitles(master_text: str, variants: List[Tuple[str, Dict[str, str]]], selected_uri: str) -> bool:
-    subtitle_groups = set()
-    for line in master_text.splitlines():
-        line = line.strip()
-        if not line.upper().startswith("#EXT-X-MEDIA:"):
-            continue
-        attrs = _parse_hls_attribute_list(line.split(":", 1)[1])
-        if (attrs.get("type") or "").upper() == "SUBTITLES" and attrs.get("uri"):
-            group_id = attrs.get("group-id")
-            if group_id:
-                subtitle_groups.add(group_id)
-    if not subtitle_groups:
-        return False
-
-    for uri, attrs in variants:
-        if uri != selected_uri:
-            continue
-        group_id = attrs.get("subtitles")
-        return bool(group_id and group_id in subtitle_groups)
-    return False
-
-
-def _hls_source_has_subtitles(source_url: str) -> bool:
-    parsed = urllib.parse.urlparse(source_url or "")
-    scheme = parsed.scheme.lower()
-    if scheme and scheme not in ("http", "https", "file") and not re.fullmatch(r"[a-z]", scheme):
-        return False
-
-    text = ""
-    if scheme in ("http", "https"):
-        if _needs_pluto_headers(source_url):
-            return False
-        try:
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122 Safari/537.36",
-                "Accept": "application/vnd.apple.mpegurl,application/x-mpegURL,*/*",
-            }
-            with urllib.request.urlopen(urllib.request.Request(source_url, headers=headers), timeout=5) as resp:
-                text = resp.read(512 * 1024).decode("utf-8", errors="replace")
-        except Exception:
-            return False
-    else:
-        path = parsed.path if scheme == "file" else source_url
-        if not path or not os.path.isfile(path):
-            return False
-        try:
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
-                text = f.read(512 * 1024)
-        except OSError:
-            return False
-
-    for line in text.splitlines():
-        line = line.strip()
-        if not line.upper().startswith("#EXT-X-MEDIA:"):
-            continue
-        attrs = _parse_hls_attribute_list(line.split(":", 1)[1])
-        if (attrs.get("type") or "").upper() == "SUBTITLES" and attrs.get("uri"):
-            return True
-    return False
-
-
-def _escape_ffmpeg_filter_filename(value: str) -> str:
-    return (value or "").replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
-
-
-def _hls_subtitle_burn_filter(source_url: str) -> Optional[str]:
-    if not _hls_source_has_subtitles(source_url):
-        return None
-    # The subtitles filter opens HLS subtitle playlists in a separate demuxer
-    # context that does not inherit the input protocol whitelist. Leave playback
-    # unfiltered so streams do not fail on https subtitle renditions.
-    return None
 
 
 def video_encoder_args(output_codec: str, bitrate: str, use_hls_profile: bool = False, vista_mode: bool = False):
@@ -322,9 +238,6 @@ def ffmpeg_transcode_stream(
         "-dn",
         "-sn",
     ])
-    subtitle_filter = _hls_subtitle_burn_filter(source_url)
-    if subtitle_filter:
-        cmd.extend(["-vf", subtitle_filter])
     cmd += video_encoder_args(output_codec, effective_bitrate, use_hls_profile=use_hls_profile, vista_mode=vista_mode) + [
         "-c:a", audio_codec,
         "-b:a", "192k",
