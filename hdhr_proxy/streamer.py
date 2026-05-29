@@ -179,8 +179,10 @@ def _escape_ffmpeg_filter_filename(value: str) -> str:
 def _hls_subtitle_burn_filter(source_url: str) -> Optional[str]:
     if not _hls_source_has_subtitles(source_url):
         return None
-    logger.info("Burning first HLS subtitle track into video")
-    return "subtitles=filename='{}':si=0".format(_escape_ffmpeg_filter_filename(source_url))
+    # The subtitles filter opens HLS subtitle playlists in a separate demuxer
+    # context that does not inherit the input protocol whitelist. Leave playback
+    # unfiltered so streams do not fail on https subtitle renditions.
+    return None
 
 
 def video_encoder_args(output_codec: str, bitrate: str, use_hls_profile: bool = False, vista_mode: bool = False):

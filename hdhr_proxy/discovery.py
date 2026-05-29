@@ -2553,9 +2553,11 @@ class DiscoveryServer:
     def _hls_subtitle_burn_filter(self, source_url: str) -> Optional[str]:
         if not self._hls_source_has_subtitles(source_url):
             return None
-        escaped_source = self._escape_ffmpeg_filter_filename(source_url)
-        logger.info("Burning first HLS subtitle track into video for WMC playback")
-        return f"subtitles=filename='{escaped_source}':si=0"
+        # FFmpeg's subtitles filter opens HLS subtitle renditions through its own
+        # demuxer context. For network-backed HLS masters that context does not
+        # inherit our protocol whitelist, so https subtitle playlists can abort
+        # the whole stream before WMC receives any bytes.
+        return None
 
     def _hls_source_has_subtitles(self, source_url: str) -> bool:
         parsed = urllib.parse.urlparse(source_url or "")
