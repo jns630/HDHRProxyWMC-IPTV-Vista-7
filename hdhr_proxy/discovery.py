@@ -15,6 +15,7 @@ import time
 import zlib
 import queue
 import tempfile
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
@@ -1411,10 +1412,7 @@ class DiscoveryServer:
                 "Referer": "https://pluto.tv/",
             }
             request = urllib.request.Request(upstream_url, headers=headers)
-            with urllib.request.urlopen(request, timeout=15, context=self._vista_hls_ssl_context) as response:
-                resolved_url = response.geturl() or upstream_url
-                content_type = response.headers.get("Content-Type") or "application/octet-stream"
-                data = response.read()
+            data, resolved_url, content_type = self._fetch_vista_hls_resource(request, upstream_url)
             if self._is_hls_playlist_response(resolved_url, content_type, data):
                 data = self._rewrite_vista_hls_playlist(data, resolved_url)
                 content_type = "application/vnd.apple.mpegurl"
@@ -1427,6 +1425,25 @@ class DiscoveryServer:
         except Exception as exc:
             logger.warning("Vista HLS relay fetch failed for %s: %s", upstream_url, exc)
             handler.send_error(502, "Unable to fetch HLS resource")
+
+    def _fetch_vista_hls_resource(self, request, upstream_url: str) -> Tuple[bytes, str, str]:
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(request, timeout=15, context=self._vista_hls_ssl_context) as response:
+                    return (
+                        response.read(),
+                        response.geturl() or upstream_url,
+                        response.headers.get("Content-Type") or "application/octet-stream",
+                    )
+            except urllib.error.HTTPError as exc:
+                if exc.code < 500 or attempt == 2:
+                    raise
+            except Exception:
+                if attempt == 2:
+                    raise
+            time.sleep(0.15)
+            logger.info("Retrying Vista HLS relay fetch for %s", upstream_url)
+        raise RuntimeError("Vista HLS relay fetch retry loop exited unexpectedly")
 
     def _is_hls_playlist_response(self, url: str, content_type: str, data: bytes) -> bool:
         path = urllib.parse.urlparse(url or "").path.lower()
