@@ -5,6 +5,7 @@ import logging
 import os
 import json
 import shutil
+import sys
 import ctypes
 import xml.sax.saxutils
 import subprocess
@@ -1524,10 +1525,13 @@ class DiscoveryServer:
         text = str(filter_value or "").strip().lower()
         if not text or text in ("none", "bypass", "r"):
             return False
-        return "0x" in text
+        return "0x" in text and not self._filter_has_broad_pid_range(text)
 
     def _filter_match_candidates(self, state: Dict) -> Tuple[List[Dict], List[Dict], int]:
-        requested = self._requested_filter_pids(state.get("filter"))
+        filter_value = state.get("filter")
+        if self._filter_has_broad_pid_range(filter_value):
+            return [], [], 0
+        requested = self._requested_filter_pids(filter_value)
         if not requested:
             return [], [], 0
         av_matches = [
@@ -1594,7 +1598,7 @@ class DiscoveryServer:
         # During TV setup, Vista probes program 0 and then tests individual PMT/AV
         # PIDs. Starting a real single-program stream here makes WMC keep only that
         # one subchannel. Keep sending the full RF PSIP until it selects a program.
-        return len([rf for rf in self._rf_channels if int(rf.get("physical") or 0) == physical]) > 1
+        return any(int(rf.get("physical") or 0) == physical for rf in self._rf_channels)
 
     def _is_scan_like_tune(self, channel_value: object) -> bool:
         channel_text = str(channel_value or "").lower()
@@ -1669,6 +1673,17 @@ class DiscoveryServer:
                 first, last = last, first
             requested.update(range(first, min(last, 0x1FFF) + 1))
         return requested
+
+    def _filter_has_broad_pid_range(self, filter_value: object) -> bool:
+        text = str(filter_value or "").lower()
+        for start, end in re.findall(r"0x([0-9a-f]+)\s*-\s*0x([0-9a-f]+)", text):
+            first = int(start, 16)
+            last = int(end, 16)
+            if first > last:
+                first, last = last, first
+            if last - first >= 0x100:
+                return True
+        return False
 
     def _literal_filter_pids(self, filter_value: object) -> set:
         text = str(filter_value or "").lower()
@@ -2472,11 +2487,33 @@ class DiscoveryServer:
         if ffmpeg_path and os.path.isfile(ffmpeg_path):
             return ffmpeg_path
 
+        if ffmpeg_path and os.path.isdir(ffmpeg_path):
+            directory_candidates = [
+                os.path.join(ffmpeg_path, "ffmpeg.exe"),
+                os.path.join(ffmpeg_path, "bin", "ffmpeg.exe"),
+            ]
+            for root, dirs, files in os.walk(ffmpeg_path):
+                dirs[:] = dirs[:12]
+                if "ffmpeg.exe" in files:
+                    directory_candidates.append(os.path.join(root, "ffmpeg.exe"))
+                    break
+            for candidate in directory_candidates:
+                if os.path.isfile(candidate):
+                    logger.info("Resolved ffmpeg directory %s to %s", ffmpeg_path, candidate)
+                    return candidate
+
         resolved = shutil.which(ffmpeg_path or "ffmpeg")
         if resolved:
             return resolved
 
+        executable_dir = os.path.dirname(os.path.abspath(sys.executable))
         candidates = [
+            os.path.join(os.getcwd(), "ffmpeg.exe"),
+            os.path.join(os.getcwd(), "ffmpeg", "ffmpeg.exe"),
+            os.path.join(os.getcwd(), "ffmpeg", "bin", "ffmpeg.exe"),
+            os.path.join(executable_dir, "ffmpeg.exe"),
+            os.path.join(executable_dir, "ffmpeg", "ffmpeg.exe"),
+            os.path.join(executable_dir, "ffmpeg", "bin", "ffmpeg.exe"),
             r"D:\WMC_EPG\New folder (4)\hdhr_proxy\ffmpeg\ffmpeg-2026-05-18-git-b4d11dffbf-essentials_build\bin\ffmpeg.exe",
             r"C:\Users\jawwa\Downloads\Compressed\ffmpeg-2026-03-30-git-e54e117998-full_build\ffmpeg-2026-03-30-git-e54e117998-full_build\bin\ffmpeg.exe",
             r"C:\Program Files\NextPVR\Other\ffmpeg.exe",
@@ -2489,6 +2526,8 @@ class DiscoveryServer:
                 logger.info("Using ffmpeg at %s", candidate)
                 return candidate
 
+        if ffmpeg_path:
+            logger.warning("Configured ffmpeg path was not executable: %s", ffmpeg_path)
         return ffmpeg_path or "ffmpeg"
 
     def _firmware_model_name(self) -> str:
