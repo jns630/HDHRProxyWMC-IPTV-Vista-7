@@ -16,6 +16,9 @@ import queue
 import tempfile
 import urllib.parse
 import urllib.request
+import uuid
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from socketserver import ThreadingMixIn
 from typing import Callable, Dict, List, Optional, Tuple
 
 from .m3u_parser import M3UParser
@@ -44,6 +47,21 @@ HDHR_TAG_ERROR_MESSAGE = 0x05
 HDHR_TAG_TUNER_COUNT = 0x10
 HDHR_TAG_LINEUP_URL = 0x27
 HDHR_TAG_BASE_URL = 0x2A
+
+
+class _ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True
+
+
+class _VistaHLSRelayHandler(BaseHTTPRequestHandler):
+    server_version = "VistaHLSRelay/1.0"
+    sys_version = ""
+
+    def do_GET(self):
+        self.server.relay_owner._handle_vista_hls_relay_request(self)
+
+    def log_message(self, fmt, *args):
+        logger.debug("Vista HLS relay: %s", fmt % args)
 HDHR_TAG_DEVICE_AUTH_STR = 0x2B
 
 HDHR_DEVICE_TYPE_WILDCARD = 0xFFFFFFFF
@@ -266,6 +284,9 @@ class DiscoveryServer:
         self._lineup_scan_started_at = 0.0
         self._hls_variant_cache: Dict[str, Tuple[str, float]] = {}
         self._prepared_input_cache: Dict[str, Tuple[str, float]] = {}
+        self._vista_hls_relay_server = None
+        self._vista_hls_relay_urls: Dict[str, str] = {}
+        self._vista_hls_relay_lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._rf_channels = self._build_rf_channel_map()
         self._tuner_state = {
@@ -1301,6 +1322,8 @@ class DiscoveryServer:
         # separate EXT-X-MEDIA audio rendition makes ffmpeg open extra low-bandwidth
         # side streams and can cause WMC-visible stutter.
         audio_url = None
+        if self.force_vista_mode and video_url.lower().startswith("https://"):
+            video_url = self._vista_hls_relay_url(video_url)
         bandwidth = selected_attrs.get("average-bandwidth") or selected_attrs.get("bandwidth") or "3000000"
         resolution = selected_attrs.get("resolution") or "unknown"
 
@@ -1335,6 +1358,81 @@ class DiscoveryServer:
             audio_url or "none",
         )
         return path
+
+    def _vista_hls_relay_url(self, upstream_url: str) -> str:
+        with self._vista_hls_relay_lock:
+            if not self._vista_hls_relay_server:
+                server = _ThreadingHTTPServer(("127.0.0.1", 0), _VistaHLSRelayHandler)
+                server.relay_owner = self
+                self._vista_hls_relay_server = server
+                threading.Thread(
+                    target=server.serve_forever,
+                    daemon=True,
+                    name="vista-hls-relay",
+                ).start()
+                logger.info("Vista HLS relay started on http://127.0.0.1:%s", server.server_port)
+            token = uuid.uuid4().hex
+            self._vista_hls_relay_urls[token] = upstream_url
+            return f"http://127.0.0.1:{self._vista_hls_relay_server.server_port}/hls/{token}"
+
+    def _handle_vista_hls_relay_request(self, handler: BaseHTTPRequestHandler):
+        parsed = urllib.parse.urlparse(handler.path)
+        token = parsed.path.rsplit("/", 1)[-1]
+        with self._vista_hls_relay_lock:
+            upstream_url = self._vista_hls_relay_urls.get(token)
+        if not upstream_url:
+            handler.send_error(404, "Unknown HLS relay URL")
+            return
+        try:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122 Safari/537.36",
+                "Accept": "*/*",
+                "Origin": "https://pluto.tv",
+                "Referer": "https://pluto.tv/",
+            }
+            request = urllib.request.Request(upstream_url, headers=headers)
+            with urllib.request.urlopen(request, timeout=15) as response:
+                resolved_url = response.geturl() or upstream_url
+                content_type = response.headers.get("Content-Type") or "application/octet-stream"
+                data = response.read()
+            if self._is_hls_playlist_response(resolved_url, content_type, data):
+                data = self._rewrite_vista_hls_playlist(data, resolved_url)
+                content_type = "application/vnd.apple.mpegurl"
+            handler.send_response(200)
+            handler.send_header("Content-Type", content_type)
+            handler.send_header("Content-Length", str(len(data)))
+            handler.send_header("Cache-Control", "no-cache")
+            handler.end_headers()
+            handler.wfile.write(data)
+        except Exception as exc:
+            logger.warning("Vista HLS relay fetch failed for %s: %s", upstream_url, exc)
+            handler.send_error(502, "Unable to fetch HLS resource")
+
+    def _is_hls_playlist_response(self, url: str, content_type: str, data: bytes) -> bool:
+        path = urllib.parse.urlparse(url or "").path.lower()
+        lowered_type = (content_type or "").lower()
+        return (
+            path.endswith((".m3u8", ".m3u"))
+            or "mpegurl" in lowered_type
+            or data.lstrip().startswith(b"#EXTM3U")
+        )
+
+    def _rewrite_vista_hls_playlist(self, data: bytes, base_url: str) -> bytes:
+        text = data.decode("utf-8", errors="replace")
+
+        def relay_uri(match):
+            value = match.group(1)
+            absolute = urllib.parse.urljoin(base_url, value)
+            return 'URI="' + self._vista_hls_relay_url(absolute) + '"'
+
+        lines = []
+        for line in text.splitlines():
+            if line.startswith("#"):
+                line = re.sub(r'URI="([^"]+)"', relay_uri, line, flags=re.IGNORECASE)
+            elif line.strip():
+                line = self._vista_hls_relay_url(urllib.parse.urljoin(base_url, line.strip()))
+            lines.append(line)
+        return ("\n".join(lines) + "\n").encode("utf-8")
 
     def _resolve_nested_hls_variant(self, video_url: str) -> Tuple[str, Dict[str, str], str, str]:
         try:
