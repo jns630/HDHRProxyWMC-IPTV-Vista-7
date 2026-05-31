@@ -1980,6 +1980,7 @@ class DiscoveryServer:
             rtp_sequence = zlib.crc32(rtp_seed) & 0xFFFF
             rtp_timestamp = int(time.time() * 90000) & 0xFFFFFFFF
             rtp_ssrc = zlib.crc32(b"HDHR" + rtp_seed) & 0xFFFFFFFF
+            last_burst_at = time.monotonic()
             while not stop_event.is_set():
                 if prebuffered:
                     burst = prebuffered.pop(0)
@@ -1987,9 +1988,30 @@ class DiscoveryServer:
                     try:
                         burst = burst_queue.get(timeout=0.5)
                     except queue.Empty:
+                        if (
+                            self.force_vista_mode
+                            and bytes_sent > 0
+                            and proc.poll() is None
+                            and time.monotonic() - last_burst_at >= 4.0
+                        ):
+                            message = (
+                                f"Vista FFmpeg transport stalled for tuner{tuner_idx}; "
+                                "restarting active stream\n"
+                            )
+                            try:
+                                log_file.write(message.encode("utf-8", errors="replace"))
+                            except Exception:
+                                pass
+                            logger.warning(
+                                "Vista FFmpeg transport stalled for tuner%s; restarting active stream",
+                                tuner_idx,
+                            )
+                            proc.terminate()
+                            break
                         continue
                 if burst is None:
                     break
+                last_burst_at = time.monotonic()
                 now = time.perf_counter()
                 if next_send > now:
                     delay = next_send - now
