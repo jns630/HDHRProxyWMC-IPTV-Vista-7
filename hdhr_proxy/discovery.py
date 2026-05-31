@@ -2515,8 +2515,9 @@ class DiscoveryServer:
         args = [
             "-c:v", "mpeg2video",
             "-profile:v", "main",
-            "-level:v", "main",
         ] + common
+        if not vista_mode:
+            args.extend(["-level:v", "main"])
         if vista_mode:
             args.extend([
                 "-q:v", "3",
