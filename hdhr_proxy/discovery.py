@@ -1251,7 +1251,16 @@ class DiscoveryServer:
         stream_stop = threading.Event()
         stream_thread = threading.Thread(
             target=self._udp_bridge_from_ffmpeg,
-            args=(proc, udp_addr, self._transport_bps(), stream_target.lower().startswith("rtp://"), stream_stop, log_file, tuner_idx),
+            args=(
+                proc,
+                udp_addr,
+                self._transport_bps(),
+                stream_target.lower().startswith("rtp://"),
+                stream_stop,
+                log_file,
+                tuner_idx,
+                original_source_url,
+            ),
             daemon=True,
             name=f"hdhr-stream-{tuner_idx}",
         )
@@ -1926,6 +1935,7 @@ class DiscoveryServer:
         stop_event: threading.Event,
         log_file,
         tuner_idx: int,
+        source_url: str = "",
     ):
         stdout = proc.stdout
         if stdout is None:
@@ -1937,8 +1947,8 @@ class DiscoveryServer:
         # WMC recording is more sensitive to short upstream HLS stalls than to a
         # little startup latency. Keep the steady queue deep, but do not hold the
         # first packets too long or WMC sits on a black screen before video appears.
-        prebuffer_seconds = 0.40 if use_rtp else 0.20
-        max_buffer_seconds = 8.0 if use_rtp else 3.0
+        smooth_segmented_hls = self._should_smooth_segmented_hls(use_rtp, source_url)
+        prebuffer_seconds, max_buffer_seconds = self._udp_bridge_buffer_seconds(use_rtp, source_url)
         buffer_target_bytes = max(burst_size * 4, int((transport_bps / 8) * prebuffer_seconds))
         buffer_max_bursts = max(192, int((transport_bps / 8) * max_buffer_seconds) // burst_size)
         burst_queue: "queue.Queue[Optional[bytes]]" = queue.Queue(maxsize=buffer_max_bursts)
@@ -1989,6 +1999,8 @@ class DiscoveryServer:
                     continue
                 if burst is None:
                     break
+                if smooth_segmented_hls and not prebuffered:
+                    prebuffer_deadline = time.monotonic() + prebuffer_seconds
                 buffered_bytes += len(burst)
                 prebuffered.append(burst)
 
@@ -2079,6 +2091,20 @@ class DiscoveryServer:
                 pass
             logger.info("UDP bridge stopped for tuner%s after %.1fs (%d bytes)", tuner_idx, elapsed, bytes_sent)
             self._handle_unexpected_stream_exit(tuner_idx, proc, stop_event, bytes_sent, elapsed)
+
+    def _udp_bridge_buffer_seconds(self, use_rtp: bool, source_url: str) -> Tuple[float, float]:
+        if self._should_smooth_segmented_hls(use_rtp, source_url):
+            return 2.50, 12.0
+        if use_rtp:
+            return 0.40, 8.0
+        return 0.20, 3.0
+
+    def _should_smooth_segmented_hls(self, use_rtp: bool, source_url: str) -> bool:
+        return (
+            use_rtp
+            and self._uses_hls_quality_profile(source_url)
+            and not self._needs_pluto_headers(source_url)
+        )
 
     def _handle_unexpected_stream_exit(
         self,

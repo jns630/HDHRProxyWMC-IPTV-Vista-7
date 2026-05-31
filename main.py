@@ -306,7 +306,7 @@ def run_proxy(cfg: Config):
     elif cfg.m3u_file:
         m3u_path = cfg.m3u_file
         if not os.path.isabs(m3u_path):
-            m3u_path = os.path.join(os.path.dirname(__file__), m3u_path)
+            m3u_path = os.path.abspath(m3u_path)
         channels = M3UParser.parse_file(m3u_path, hls_base_url=cfg.hls_base_url)
     else:
         logger.error("No M3U source configured. Use --m3u-file, --m3u-url, or config.")
@@ -527,9 +527,11 @@ Examples:
 
     # Override with CLI args
     if args.m3u_file:
-        cfg.m3u_file = args.m3u_file
+        cfg.m3u_file = os.path.abspath(os.path.expandvars(os.path.expanduser(args.m3u_file)))
+        cfg.m3u_url = None
     if args.m3u_url:
         cfg.m3u_url = args.m3u_url
+        cfg.m3u_file = None
     if args.hls_base_url:
         cfg.hls_base_url = args.hls_base_url
     if args.xmltv_file:
