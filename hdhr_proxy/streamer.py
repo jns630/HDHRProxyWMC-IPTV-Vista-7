@@ -221,7 +221,6 @@ def ffmpeg_transcode_stream(
         "-reconnect_at_eof", "1",
         "-reconnect_streamed", "1",
         "-reconnect_delay_max", "2",
-        "-reconnect_on_network_error", "1",
         "-rw_timeout", "15000000",
         "-thread_queue_size", "1024",
         "-user_agent", "VLC/3.0.20 LibVLC/3.0.20",
@@ -234,7 +233,7 @@ def ffmpeg_transcode_stream(
         "-i", source_url,
         "-map", "0:v:0?",
         "-map", "0:a:0?",
-        "-fps_mode", "cfr",
+        "-vsync", "cfr",
         "-dn",
         "-sn",
     ])

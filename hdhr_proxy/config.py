@@ -25,6 +25,7 @@ DEFAULT_CONFIG = {
     "guide_only_lineup": False,
     "force_vista_mode": False,
     "programs_per_physical": None,
+    "max_physical_channel": 59,
     "ffmpeg_path": r"D:\WMC_EPG\New folder (4)\hdhr_proxy\ffmpeg\ffmpeg-2026-05-18-git-b4d11dffbf-essentials_build\bin\ffmpeg.exe",
     "ffmpeg_enabled": True,
     "ffmpeg_output_codec": "mpeg2video",

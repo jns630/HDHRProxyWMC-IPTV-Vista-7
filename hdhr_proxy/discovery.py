@@ -2312,12 +2312,9 @@ class DiscoveryServer:
         if self._is_network_media_source(source_url):
             input_args.extend([
                 "-rw_timeout", "15000000",
-                "-http_persistent", "0",
                 "-reconnect_at_eof", "1",
                 "-reconnect_streamed", "1",
                 "-reconnect_delay_max", "2",
-                "-reconnect_on_http_error", "4xx,5xx",
-                "-reconnect_on_network_error", "1",
                 "-user_agent", "VLC/3.0.20 LibVLC/3.0.20",
             ])
             parsed = urllib.parse.urlparse(source_url or "")
@@ -2344,7 +2341,7 @@ class DiscoveryServer:
         output_args = [
             "-map", video_map,
             "-map", audio_map,
-            "-fps_mode", "cfr",
+            "-vsync", "cfr",
             "-dn",
             "-sn",
         ]

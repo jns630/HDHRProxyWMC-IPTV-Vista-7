@@ -317,7 +317,7 @@ def run_proxy(cfg: Config):
         base_url=base_url,
         channel_mapping=cfg.channel_mapping,
         tuner_count=cfg.tuner_count,
-        max_physical_channel=cfg.get("max_physical_channel", 69),
+        max_physical_channel=cfg.get("max_physical_channel", 59),
         programs_per_physical=cfg.get("programs_per_physical"),
     )
     xmltv_data = load_xmltv(cfg.xmltv_file, cfg.xmltv_url, channel_map)
