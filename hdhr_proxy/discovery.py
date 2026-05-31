@@ -1387,7 +1387,11 @@ class DiscoveryServer:
                     name="vista-hls-relay",
                 ).start()
                 logger.info("Vista HLS relay started on http://127.0.0.1:%s", server.server_port)
-            token = uuid.uuid4().hex
+            # Keep the upstream suffix visible. ffmpeg's HLS demuxer rejects
+            # extensionless segment URLs before requesting them, even when
+            # -allowed_extensions ALL is set.
+            suffix = os.path.splitext(urllib.parse.urlparse(upstream_url).path)[1]
+            token = uuid.uuid4().hex + suffix
             self._vista_hls_relay_urls[token] = upstream_url
             return f"http://127.0.0.1:{self._vista_hls_relay_server.server_port}/hls/{token}"
 
