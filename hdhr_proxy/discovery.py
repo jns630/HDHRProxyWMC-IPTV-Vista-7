@@ -1,4 +1,5 @@
 import re
+import ssl
 import socket
 import struct
 import logging
@@ -287,6 +288,9 @@ class DiscoveryServer:
         self._vista_hls_relay_server = None
         self._vista_hls_relay_urls: Dict[str, str] = {}
         self._vista_hls_relay_lock = threading.Lock()
+        # Vista's stale trust store rejects certificates used by modern HLS
+        # CDNs. Keep this compatibility exception inside the localhost relay.
+        self._vista_hls_ssl_context = ssl._create_unverified_context() if force_vista_mode else None
         self._state_lock = threading.Lock()
         self._rf_channels = self._build_rf_channel_map()
         self._tuner_state = {
@@ -1269,7 +1273,19 @@ class DiscoveryServer:
         local_master = self._build_local_pluto_master(source_url)
         if local_master:
             return local_master, local_master
-        return self._resolve_hls_source_url(source_url), None
+        resolved_url = self._resolve_hls_source_url(source_url)
+        source_path = urllib.parse.urlparse(source_url or "").path.lower()
+        resolved_path = urllib.parse.urlparse(resolved_url or "").path.lower()
+        if (
+            self.force_vista_mode
+            and resolved_url.lower().startswith("https://")
+            and (
+                source_path.endswith((".m3u8", ".m3u"))
+                or resolved_path.endswith((".m3u8", ".m3u"))
+            )
+        ):
+            return self._vista_hls_relay_url(resolved_url), None
+        return resolved_url, None
 
     def _build_local_pluto_master(self, source_url: str) -> Optional[str]:
         parsed = urllib.parse.urlparse(source_url or "")
@@ -1391,7 +1407,7 @@ class DiscoveryServer:
                 "Referer": "https://pluto.tv/",
             }
             request = urllib.request.Request(upstream_url, headers=headers)
-            with urllib.request.urlopen(request, timeout=15) as response:
+            with urllib.request.urlopen(request, timeout=15, context=self._vista_hls_ssl_context) as response:
                 resolved_url = response.geturl() or upstream_url
                 content_type = response.headers.get("Content-Type") or "application/octet-stream"
                 data = response.read()
