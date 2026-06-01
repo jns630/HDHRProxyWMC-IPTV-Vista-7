@@ -103,7 +103,7 @@ def _should_keep_original_hls_url(source_url: str, playback_url: str) -> bool:
 
 def video_encoder_args(output_codec: str, bitrate: str, use_hls_profile: bool = False, vista_mode: bool = False):
     codec = (output_codec or "mpeg2video").lower()
-    frame_size = "720x480" if vista_mode else "1280x720"
+    frame_size = "640x360" if vista_mode else "1280x720"
     bitrate_text = str(bitrate or "").strip().lower()
     match = re.match(r"^(\d+)([km]?)$", bitrate_text)
     if match:
@@ -133,23 +133,22 @@ def video_encoder_args(output_codec: str, bitrate: str, use_hls_profile: bool = 
             "-g", "15",
             "-bf", "0",
         ] + base_args
-    # mpeg2video — avoid VBV constraints that cause "impossible bitrate constraints" error
+    # Avoid VBV constraints on Vista's old ffmpeg MPEG-2 encoder.
     args = [
         "-c:v", "mpeg2video",
-        "-profile:v", "main",
-        "-level:v", "main",
         "-b:v", bitrate,
-        "-maxrate:v", bitrate,
-        "-bufsize:v", video_bufsize,
         "-g", "15",
         "-bf", "0",
     ] + base_args
-    if vista_mode:
+    if not vista_mode:
         args.extend([
-            "-q:v", "3",
-            "-intra_vlc", "1",
-            "-non_linear_quant", "1",
+            "-profile:v", "main",
+            "-level:v", "main",
+            "-maxrate:v", bitrate,
+            "-bufsize:v", video_bufsize,
         ])
+    if vista_mode:
+        args.extend(["-threads", "2"])
     if use_hls_profile:
         args.extend([
             "-qmin", "2",
@@ -206,7 +205,7 @@ def ffmpeg_transcode_stream(
 ):
     source_url = _resolve_hls_source_url(source_url)
     use_hls_profile = _is_hls_like_source(source_url)
-    effective_bitrate = _hls_profile_bitrate(bitrate) if use_hls_profile else bitrate
+    effective_bitrate = _hls_profile_bitrate(bitrate) if use_hls_profile and not vista_mode else bitrate
     cmd = [
         ffmpeg_path,
         "-hide_banner",
