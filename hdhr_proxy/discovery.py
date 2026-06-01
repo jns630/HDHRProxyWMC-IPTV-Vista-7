@@ -1326,7 +1326,7 @@ class DiscoveryServer:
             return None
 
         variants = M3UParser._hls_variant_uris(raw)
-        selected = M3UParser._select_hls_variant(variants)
+        selected = self._select_hls_variant_for_playback(variants)
         if not selected:
             return None
 
@@ -1496,7 +1496,7 @@ class DiscoveryServer:
             return video_url, {}, "", video_url
 
         variants = M3UParser._hls_variant_uris(raw)
-        selected = M3UParser._select_hls_variant(variants)
+        selected = self._select_hls_variant_for_playback(variants)
         if not selected:
             return video_url, {}, raw, base_url
 
@@ -1506,6 +1506,20 @@ class DiscoveryServer:
                 selected_attrs = attrs
                 break
         return urllib.parse.urljoin(base_url, selected), selected_attrs, raw, base_url
+
+    def _select_hls_variant_for_playback(self, variants: List[Tuple[str, Dict[str, str]]]) -> Optional[str]:
+        if not self.force_vista_mode:
+            return M3UParser._select_hls_variant(variants)
+
+        suitable = []
+        for uri, attrs in variants:
+            resolution = attrs.get("resolution", "")
+            match = re.match(r"(\d+)x(\d+)", resolution)
+            if match and int(match.group(2)) <= 540:
+                suitable.append((uri, attrs))
+        if suitable:
+            return M3UParser._select_hls_variant(suitable)
+        return M3UParser._select_hls_variant(variants)
 
     def _select_hls_audio_url(self, master_text: str, base_url: str, selected_attrs: Dict[str, str]) -> Optional[str]:
         group_id = (selected_attrs.get("audio") or "").strip()
