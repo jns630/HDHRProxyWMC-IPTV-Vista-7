@@ -179,7 +179,14 @@ def import_mxf(output_path: str) -> None:
     if not os.path.exists(loadmxf):
         raise FileNotFoundError(f"loadmxf.exe not found at {loadmxf}")
     logger.info("Importing MXF into Windows Media Center: %s", output_path)
-    subprocess.run([loadmxf, "-v", "-i", output_path], check=True)
+    try:
+        subprocess.run([loadmxf, "-v", "-i", output_path], check=True)
+    except PermissionError as exc:
+        raise PermissionError(
+            "Windows Media Center denied the MXF import. Run the proxy from an "
+            "elevated Administrator command prompt and keep the MXF file in a "
+            "user-writable folder such as C:\\Temp."
+        ) from exc
 
 
 def run_wmc_post_import_tasks() -> None:
@@ -480,8 +487,7 @@ def _build_vista_mxf_root(
 ) -> ET.Element:
     root = ET.Element("MXF")
 
-    _append_assembly_plain(root, "mcepg", "Microsoft.MediaCenter.Guide", [
-        ("DeviceGroup", None, None),
+    mcepg_types = [
         ("Lineup", None, None),
         ("Channel", "lineup", None),
         ("Service", None, None),
@@ -500,22 +506,26 @@ def _build_vista_mxf_root(
         ("Affiliate", None, None),
         ("SeriesInfo", None, None),
         ("Season", None, None),
-    ])
+    ]
+    if epg123_mode:
+        mcepg_types.insert(0, ("DeviceGroup", None, None))
+    _append_assembly_plain(root, "mcepg", "Microsoft.MediaCenter.Guide", mcepg_types)
     _append_assembly_plain(root, "mcstore", "Microsoft.MediaCenter.Store", [
         ("Provider", None, None),
         ("UId", "target", None),
     ])
 
-    ET.SubElement(root, "DeviceGroup", {
-        "uid": "!DeviceGroup!All",
-        "name": "All",
-        "lastConfigurationChange": _to_device_group_time(datetime.now(timezone.utc)),
-        "rank": "0",
-        "permitAnyDeviceType": "true",
-        "isEnabled": "true",
-        "firstRunProcessId": "0",
-        "onlyShowDynamicLineups": "false",
-    })
+    if epg123_mode:
+        ET.SubElement(root, "DeviceGroup", {
+            "uid": "!DeviceGroup!All",
+            "name": "All",
+            "lastConfigurationChange": _to_device_group_time(datetime.now(timezone.utc)),
+            "rank": "0",
+            "permitAnyDeviceType": "true",
+            "isEnabled": "true",
+            "firstRunProcessId": "0",
+            "onlyShowDynamicLineups": "false",
+        })
 
     providers = ET.SubElement(root, "Providers")
     ET.SubElement(providers, "Provider", {
@@ -589,11 +599,14 @@ def _build_vista_mxf_root(
         lineup_specs = [("l1", VISTA_LINEUP_KEY, "HDHRProxy Local Broadcast Listings")]
 
     for lineup_id, lineup_key, lineup_name in lineup_specs:
-        lineup_el = ET.SubElement(lineups_el, "Lineup", {
+        lineup_attrs = {
             "id": lineup_id,
-            "uid": f"!MCLineup!{lineup_key}",
+            "uid": f"!MCLineup!{lineup_key}" if epg123_mode else f"!Lineup!{lineup_key}",
             "name": lineup_name,
-        })
+        }
+        if not epg123_mode:
+            lineup_attrs["primaryProvider"] = "!MCLineup!MainLineup"
+        lineup_el = ET.SubElement(lineups_el, "Lineup", lineup_attrs)
         channels_el = ET.SubElement(lineup_el, "channels")
         for meta in sorted(channel_meta.values(), key=lambda m: (m["major"], m["minor"])):
             ET.SubElement(channels_el, "Channel", {
@@ -743,7 +756,7 @@ def _append_assembly_plain(root: ET.Element, name: str, namespace_name: str, typ
         "name": name,
         "version": "6.0.6000.0",
         "publicKey": MCEPG_PUBLIC_KEY,
-        "cultureinfo": "",
+        "cultureInfo": "",
     })
     namespace_el = ET.SubElement(assembly, "NameSpace", {"name": namespace_name})
     for type_name, parent_field, group_name in types:

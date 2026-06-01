@@ -324,6 +324,13 @@ def run_proxy(cfg: Config):
     generated_mxf_path = None
     auto_match_mxf_path = None
     if xmltv_data:
+        vista_mode = bool(getattr(cfg, "force_vista_mode", False))
+        use_epg123_map = bool(getattr(cfg, "map_guide_wmc", False)) and not vista_mode
+        if vista_mode and getattr(cfg, "map_guide_wmc", False):
+            logger.warning(
+                "Vista mode uses the built-in loadmxf.exe importer because the "
+                "EPG123 WMC client targets Windows 7 or newer."
+            )
         logger.info("Loaded XMLTV guide from %s", xmltv_data.source)
         if cfg.write_mxf or cfg.import_mxf:
             mxf_path = write_mxf(
@@ -331,7 +338,7 @@ def run_proxy(cfg: Config):
                 lineup,
                 channel_map,
                 cfg.mxf_file,
-                vista_mode=bool(getattr(cfg, "force_vista_mode", False)),
+                vista_mode=vista_mode,
             )
             generated_mxf_path = mxf_path
             if cfg.import_mxf:
@@ -344,12 +351,12 @@ def run_proxy(cfg: Config):
                 channel_map,
                 xmltv_data.filtered_xml,
                 output_path=cfg.auto_match_mxf_file,
-                vista_mode=bool(getattr(cfg, "force_vista_mode", False)),
-                epg123_mode=bool(getattr(cfg, "map_guide_wmc", False)),
+                vista_mode=vista_mode,
+                epg123_mode=use_epg123_map,
             )
             logger.info("Wrote WMC auto-match MXF (%s matched channels): %s", auto_match_count, auto_match_mxf_path)
             if cfg.import_auto_match_mxf:
-                if getattr(cfg, "map_guide_wmc", False):
+                if use_epg123_map:
                     logger.info("Importing lineup-matched guide into the WMC internal database via EPG123 auto-match when available")
                     try:
                         import_and_map_mxf_with_epg123(auto_match_mxf_path)
