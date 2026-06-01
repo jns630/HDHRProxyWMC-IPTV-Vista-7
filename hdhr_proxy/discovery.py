@@ -1944,10 +1944,10 @@ class DiscoveryServer:
         packet_size = 1316
         packets_per_burst = 4
         burst_size = packet_size * packets_per_burst
-        # WMC recording is more sensitive to short upstream HLS stalls than to a
-        # little startup latency. Keep the steady queue deep, but do not hold the
+        # WMC recording is more sensitive to short segmented-input stalls than to
+        # a little startup latency. Keep the steady queue deep, but do not hold the
         # first packets too long or WMC sits on a black screen before video appears.
-        smooth_segmented_hls = self._should_smooth_segmented_hls(use_rtp, source_url)
+        smooth_segmented_input = self._should_smooth_segmented_input(use_rtp, source_url)
         prebuffer_seconds, max_buffer_seconds = self._udp_bridge_buffer_seconds(use_rtp, source_url)
         buffer_target_bytes = max(burst_size * 4, int((transport_bps / 8) * prebuffer_seconds))
         buffer_max_bursts = max(192, int((transport_bps / 8) * max_buffer_seconds) // burst_size)
@@ -1999,7 +1999,7 @@ class DiscoveryServer:
                     continue
                 if burst is None:
                     break
-                if smooth_segmented_hls and not prebuffered:
+                if smooth_segmented_input and not prebuffered:
                     prebuffer_deadline = time.monotonic() + prebuffer_seconds
                 buffered_bytes += len(burst)
                 prebuffered.append(burst)
@@ -2093,16 +2093,16 @@ class DiscoveryServer:
             self._handle_unexpected_stream_exit(tuner_idx, proc, stop_event, bytes_sent, elapsed)
 
     def _udp_bridge_buffer_seconds(self, use_rtp: bool, source_url: str) -> Tuple[float, float]:
-        if self._should_smooth_segmented_hls(use_rtp, source_url):
+        if self._should_smooth_segmented_input(use_rtp, source_url):
             return 2.50, 12.0
         if use_rtp:
             return 0.40, 8.0
         return 0.20, 3.0
 
-    def _should_smooth_segmented_hls(self, use_rtp: bool, source_url: str) -> bool:
+    def _should_smooth_segmented_input(self, use_rtp: bool, source_url: str) -> bool:
         return (
             use_rtp
-            and self._uses_hls_quality_profile(source_url)
+            and (self._uses_hls_quality_profile(source_url) or self._is_transport_stream_source(source_url))
             and not self._needs_pluto_headers(source_url)
         )
 
@@ -2292,14 +2292,14 @@ class DiscoveryServer:
     def _build_atsc_psip_sections(self, rf: Dict) -> List[Tuple[int, bytes]]:
         rf_group = self._rf_group_for_physical(rf)
         pat_section = self._make_pat_section(rf_group)
-        tvct_section = self._make_tvct_section(rf_group)
-        mgt_section = self._make_mgt_section(len(tvct_section))
+        tvct_sections = self._make_tvct_sections(rf_group)
+        mgt_section = self._make_mgt_section(sum(len(section) for section in tvct_sections))
         sections = [(0x0000, pat_section)]
         for item in rf_group:
             pmt_section = self._make_pmt_section(item)
             sections.append((int(item.get("pmt_pid") or 0x31), pmt_section))
         sections.append((0x1FFB, mgt_section))
-        sections.append((0x1FFB, tvct_section))
+        sections.extend((0x1FFB, section) for section in tvct_sections)
         return sections
 
     def _packetize_atsc_psip_sections(
@@ -2361,12 +2361,29 @@ class DiscoveryServer:
             return 0x1B
         return 0x02
 
-    def _make_tvct_section(self, rf_group: List[Dict]) -> bytes:
+    def _make_tvct_sections(self, rf_group: List[Dict]) -> List[bytes]:
+        max_channels_per_section = 80
+        chunks = [
+            rf_group[offset:offset + max_channels_per_section]
+            for offset in range(0, len(rf_group), max_channels_per_section)
+        ] or [[]]
+        last_section_number = len(chunks) - 1
+        return [
+            self._make_tvct_section(chunk, section_number, last_section_number)
+            for section_number, chunk in enumerate(chunks)
+        ]
+
+    def _make_tvct_section(
+        self,
+        rf_group: List[Dict],
+        section_number: int = 0,
+        last_section_number: int = 0,
+    ) -> bytes:
         first = rf_group[0] if rf_group else {}
         channels = b"".join(self._make_tvct_channel(rf) for rf in rf_group)
         body = (
             int(first.get("physical") or 1).to_bytes(2, "big")
-            + bytes([0xC1, 0x00, 0x00, 0x00, len(rf_group) & 0xFF])
+            + bytes([0xC1, section_number & 0xFF, last_section_number & 0xFF, 0x00, len(rf_group) & 0xFF])
             + channels
             + (0xF000).to_bytes(2, "big")  # additional_descriptors_length=0
         )
@@ -2598,6 +2615,10 @@ class DiscoveryServer:
 
     def _is_network_media_source(self, source_url: str) -> bool:
         return urllib.parse.urlparse(source_url or "").scheme.lower() in ("http", "https")
+
+    def _is_transport_stream_source(self, source_url: str) -> bool:
+        path = urllib.parse.urlparse(source_url or "").path.lower()
+        return path.endswith((".ts", ".mts", ".m2ts"))
 
     def _needs_pluto_headers(self, source_url: str) -> bool:
         host = urllib.parse.urlparse(source_url or "").netloc.lower()

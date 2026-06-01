@@ -287,12 +287,23 @@ def build_lineup(
     ch_map: Dict[str, M3UChannel] = {}
     mapping = channel_mapping or {}
     fixed_programs_per_physical = _normalize_programs_per_physical(programs_per_physical)
+    physical_count = _physical_channel_count(max_physical_channel)
+    if fixed_programs_per_physical and len(channels) > physical_count * fixed_programs_per_physical:
+        logger.warning(
+            "Preferred fixed virtual RF layout of %s programs/RF only fits %s channels; "
+            "spreading %s channels across RF %s-%s instead",
+            fixed_programs_per_physical,
+            physical_count * fixed_programs_per_physical,
+            len(channels),
+            US_BCAST_FIRST_PHYSICAL_CHANNEL,
+            max_physical_channel,
+        )
+        fixed_programs_per_physical = None
     if fixed_programs_per_physical:
         physicals_used = _physical_channels_used_for_lineup_size(len(channels), fixed_programs_per_physical)
         max_programs_per_physical = fixed_programs_per_physical
         layout_mode = "fixed"
     else:
-        physical_count = _physical_channel_count(max_physical_channel)
         physicals_used = min(len(channels), physical_count) if channels else 0
         max_programs_per_physical = _max_programs_per_physical_for_lineup_size(len(channels), max_physical_channel)
         layout_mode = "spread"
