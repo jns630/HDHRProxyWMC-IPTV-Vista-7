@@ -1944,6 +1944,7 @@ class DiscoveryServer:
         packet_size = 1316
         packets_per_burst = 4
         burst_size = packet_size * packets_per_burst
+        pace_each_datagram = self.force_vista_mode and use_rtp
         # WMC recording is more sensitive to short segmented-input stalls than to
         # a little startup latency. Keep the steady queue deep, but do not hold the
         # first packets too long or WMC sits on a black screen before video appears.
@@ -1991,6 +1992,7 @@ class DiscoveryServer:
 
             prebuffered: List[bytes] = []
             buffered_bytes = 0
+            input_finished = False
             prebuffer_deadline = time.monotonic() + prebuffer_seconds
             while not stop_event.is_set() and buffered_bytes < buffer_target_bytes and time.monotonic() < prebuffer_deadline:
                 try:
@@ -1998,6 +2000,7 @@ class DiscoveryServer:
                 except queue.Empty:
                     continue
                 if burst is None:
+                    input_finished = True
                     break
                 if smooth_segmented_input and not prebuffered:
                     prebuffer_deadline = time.monotonic() + prebuffer_seconds
@@ -2013,6 +2016,8 @@ class DiscoveryServer:
             while not stop_event.is_set():
                 if prebuffered:
                     burst = prebuffered.pop(0)
+                elif input_finished:
+                    break
                 else:
                     try:
                         burst = burst_queue.get(timeout=0.5)
@@ -2039,10 +2044,11 @@ class DiscoveryServer:
                             break
                         continue
                 if burst is None:
+                    input_finished = True
                     break
                 last_burst_at = time.monotonic()
                 now = time.perf_counter()
-                if next_send > now:
+                if not pace_each_datagram and next_send > now:
                     delay = next_send - now
                     if delay > 0.003:
                         time.sleep(delay - 0.0015)
@@ -2055,6 +2061,11 @@ class DiscoveryServer:
                     if not chunk:
                         continue
                     try:
+                        if pace_each_datagram:
+                            now = time.perf_counter()
+                            while next_send > now and not stop_event.is_set():
+                                time.sleep(0)
+                                now = time.perf_counter()
                         datagram = self._wrap_rtp_mpegts(chunk, rtp_sequence, rtp_timestamp, rtp_ssrc) if use_rtp else chunk
                         sock.sendto(datagram, addr)
                         bytes_sent += len(datagram)
@@ -2065,17 +2076,20 @@ class DiscoveryServer:
                             rtp_sequence = (rtp_sequence + 1) & 0xFFFF
                             ticks = max(1, int((len(chunk) * 8 * 90000) / max(transport_bps, 1)))
                             rtp_timestamp = (rtp_timestamp + ticks) & 0xFFFFFFFF
+                        if pace_each_datagram:
+                            datagram_seconds = (len(chunk) * 8) / max(transport_bps, 1)
+                            next_send = max(next_send + datagram_seconds, time.perf_counter() - 0.02)
                     except OSError as exc:
                         if not _is_ignorable_udp_error(exc):
                             logger.warning("UDP bridge send failed for tuner%s to %s:%s: %s", tuner_idx, addr[0], addr[1], exc)
                             return
 
-                # Pace whole bursts rather than individual datagrams. Windows timer
-                # granularity is too coarse for ~1 ms sleeps, and WMC tolerates short
-                # MPEG-TS bursts much better than slow packet-by-packet jitter.
-                burst_seconds = (burst_sent * 8) / max(transport_bps, 1)
-                now = time.perf_counter()
-                next_send = max(next_send + burst_seconds, now - 0.20)
+                # Newer WMC clients tolerate grouped transport bursts. Vista's older
+                # decoder gets the evenly paced datagram path above.
+                if not pace_each_datagram:
+                    burst_seconds = (burst_sent * 8) / max(transport_bps, 1)
+                    now = time.perf_counter()
+                    next_send = max(next_send + burst_seconds, now - 0.20)
         finally:
             _set_timer_resolution(False)
             try:
