@@ -2107,6 +2107,8 @@ class DiscoveryServer:
             self._handle_unexpected_stream_exit(tuner_idx, proc, stop_event, bytes_sent, elapsed)
 
     def _udp_bridge_buffer_seconds(self, use_rtp: bool, source_url: str) -> Tuple[float, float]:
+        if use_rtp and self._needs_pluto_headers(source_url):
+            return 1.50, 12.0
         if self._should_smooth_segmented_input(use_rtp, source_url):
             return 2.50, 12.0
         if use_rtp:
@@ -2117,7 +2119,6 @@ class DiscoveryServer:
         return (
             use_rtp
             and (self._uses_hls_quality_profile(source_url) or self._is_transport_stream_source(source_url))
-            and not self._needs_pluto_headers(source_url)
         )
 
     def _handle_unexpected_stream_exit(
