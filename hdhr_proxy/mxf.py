@@ -172,8 +172,9 @@ def write_mxf(
     tree.write(output_path, encoding="utf-8", xml_declaration=True)
     if vista_mode:
         logger.info(
-            "Wrote Windows 7+ MXF export while Vista mode is active. "
-            "Stock Vista requires its separate ehepg guide XML loader and cannot import this file: %s",
+            "Wrote MXF while Vista mode is active. Vista TV Pack can import "
+            "this file with loadmxf.exe; stock pre-TV-Pack Vista requires its "
+            "separate ehepg guide XML loader: %s",
             output_path,
         )
     else:

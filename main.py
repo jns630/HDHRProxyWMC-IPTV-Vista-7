@@ -120,11 +120,27 @@ def apply_wmc_video_codec_policy(cfg: Config):
 
 def import_mxf_for_current_wmc(output_path: str, vista_mode: bool = False, vista_xml_path: str = None) -> bool:
     if vista_mode:
+        try:
+            import_mxf(output_path)
+            logger.info("Imported MXF through the installed Vista TV Pack loadmxf.exe.")
+            return True
+        except FileNotFoundError:
+            logger.info(
+                "Vista TV Pack loadmxf.exe was not found. Trying the legacy "
+                "pre-TV-Pack Vista ehepg guide loader."
+            )
+        except (RuntimeError, PermissionError, subprocess.CalledProcessError) as exc:
+            logger.warning(
+                "Vista TV Pack MXF import failed, but the proxy will continue "
+                "running for scanning and playback. %s",
+                exc,
+            )
+            return False
         if not vista_xml_path:
             logger.warning(
-                "Skipping Windows 7+ MXF import on Vista. Generate the Vista "
-                "legacy guide XML from XMLTV by running the proxy with an "
-                "XMLTV source and --import-mxf or --import-auto-match-mxf."
+                "Skipping legacy pre-TV-Pack Vista guide import. Generate the "
+                "Vista legacy guide XML from XMLTV by running the proxy with "
+                "an XMLTV source and --import-mxf or --import-auto-match-mxf."
             )
             return False
         try:

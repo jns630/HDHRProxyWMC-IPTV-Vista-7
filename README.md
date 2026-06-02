@@ -275,7 +275,7 @@ Notes:
 
 The proxy can also convert XMLTV into a Windows Media Center MXF file and optionally import it with `loadmxf.exe` on Windows 7 or newer.
 
-Stock Vista uses its older `ehepg` guide XML loader instead. When `--vista` is combined with an import option, the proxy writes a sibling `*.vista.xml` file, packages it with Vista ATSC RF/subchannel tuning data, encrypts it with Vista's own eHome API, and imports it through `GuideLoadManager.LoadXmlFile`.
+Vista TV Pack 2008 uses its installed `loadmxf.exe` and `mcepg.dll` guide store. Stock pre-TV-Pack Vista uses its older `ehepg` guide XML loader instead. When `--vista` is combined with an import option, the proxy also writes a sibling `*.vista.xml` fallback file with Vista ATSC RF/subchannel tuning data for that older loader.
 
 Generate `guide.mxf`:
 
@@ -341,7 +341,7 @@ Or with the EXE:
 .\dist\HDHRProxyWMC-IPTV.exe --m3u-file "us_pluto.m3u" --xmltv-url "https://i.mjh.nz/PlutoTV/us.xml" --import-auto-match-mxf
 ```
 
-With `--vista`, the MXF remains a Windows 7+ export artifact. The program generates and imports a sibling `*.vista.xml` file through Vista's legacy `ehepg` loader.
+With `--vista`, the program first attempts MXF import through the installed Vista TV Pack `loadmxf.exe`. If TV Pack is absent, it generates and imports a sibling `*.vista.xml` file through Vista's legacy `ehepg` loader.
 
 After the scan exists inside WMC, run the one-shot utility that maps guide data into the WMC internal database for the current lineup:
 
@@ -361,7 +361,7 @@ For Vista, use the 32-bit Vista build and add `--vista`:
 .\dist\HDHRProxyWMC-IPTV-vista-x86.exe --m3u-file "us_pluto.m3u" --xmltv-url "https://i.mjh.nz/PlutoTV/us.xml" --map-guide-wmc --vista
 ```
 
-On Windows 7 or newer, `--map-guide-wmc` uses EPG123 when it is installed because EPG123 knows how to activate and auto-map imported guide lineups against WMC's scanned tuner channels. Without EPG123 it falls back to `loadmxf.exe`. Vista bypasses both and uses its native `ehepg` XML loader.
+On Windows 7 or newer, `--map-guide-wmc` uses EPG123 when it is installed because EPG123 knows how to activate and auto-map imported guide lineups against WMC's scanned tuner channels. Without EPG123 it falls back to `loadmxf.exe`. Vista TV Pack uses its installed `loadmxf.exe`; stock pre-TV-Pack Vista falls back to its native `ehepg` XML loader.
 
 ### Guide-only WMC scan mode
 
