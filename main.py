@@ -115,6 +115,13 @@ def apply_wmc_video_codec_policy(cfg: Config):
 
 
 def import_mxf_for_current_wmc(output_path: str, vista_mode: bool = False) -> bool:
+    if vista_mode:
+        logger.warning(
+            "Skipping MXF import on Vista. Stock Vista uses the separate ehepg "
+            "guide XML loader; Windows 7+ loadmxf.exe files with mcepg Assembly "
+            "tags are not a Vista import format."
+        )
+        return False
     try:
         import_mxf(output_path)
         return True
@@ -340,8 +347,9 @@ def run_proxy(cfg: Config):
         use_epg123_map = bool(getattr(cfg, "map_guide_wmc", False)) and not vista_mode
         if vista_mode and getattr(cfg, "map_guide_wmc", False):
             logger.warning(
-                "Vista mode uses the built-in loadmxf.exe importer because the "
-                "EPG123 WMC client targets Windows 7 or newer."
+                "Vista mode cannot import Windows 7+ MXF guide data. Stock Vista "
+                "uses the separate ehepg guide XML loader; channel scanning and "
+                "streaming will continue without changing the Vista guide store."
             )
         logger.info("Loaded XMLTV guide from %s", xmltv_data.source)
         if cfg.write_mxf or cfg.import_mxf:
@@ -610,7 +618,7 @@ Examples:
         return
 
     if cfg.import_mxf and isinstance(args.import_mxf, str) and not cfg.m3u_file and not cfg.m3u_url and not cfg.xmltv_file and not cfg.xmltv_url:
-        import_mxf(cfg.mxf_file)
+        import_mxf_for_current_wmc(cfg.mxf_file, vista_mode=bool(getattr(cfg, "force_vista_mode", False)))
         return
 
     run_proxy(cfg)

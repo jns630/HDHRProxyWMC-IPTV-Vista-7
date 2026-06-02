@@ -163,14 +163,21 @@ def write_mxf(
             force_ota_match=force_ota_match,
             epg123_mode=epg123_mode,
         )
-        if vista_mode or epg123_mode else
+        if epg123_mode else
         _build_mxf_root(channel_meta, service_programmes, force_ota_match=force_ota_match)
     )
 
     output_path = os.path.abspath(output_path)
     tree = ET.ElementTree(root)
     tree.write(output_path, encoding="utf-8", xml_declaration=True)
-    logger.info("Wrote %s MXF guide file: %s", "Vista-style" if vista_mode else "Windows 7+ style", output_path)
+    if vista_mode:
+        logger.info(
+            "Wrote Windows 7+ MXF export while Vista mode is active. "
+            "Stock Vista requires its separate ehepg guide XML loader and cannot import this file: %s",
+            output_path,
+        )
+    else:
+        logger.info("Wrote Windows 7+ MXF guide file: %s", output_path)
     return output_path
 
 
@@ -181,12 +188,11 @@ def import_mxf(output_path: str) -> None:
         raise FileNotFoundError(f"loadmxf.exe not found at {loadmxf}")
     if _mxf_requires_mcepg(output_path) and not os.path.exists(os.path.join(ehome_dir, "mcepg.dll")):
         raise RuntimeError(
-            "This MXF guide requires mcepg.dll, but this Windows Media Center "
-            "installation does not provide it. Stock Windows Vista cannot "
-            "import the Windows 7-style guide MXF. Install the Vista Media "
-            "Center TV Pack 2008 guide components, or run the proxy without "
-            "--import-mxf/--import-auto-match-mxf. Renaming the assembly to "
-            "nettv is not compatible with guide listings."
+            "This MXF guide requires the Windows 7+ mcepg.dll guide store, but "
+            "this Windows Media Center installation does not provide it. "
+            "Stock Windows Vista uses the separate ehepg guide XML loader and "
+            "cannot import this MXF file. Renaming the Assembly tag to nettv "
+            "or ehepg does not convert the document to the Vista guide XML format."
         )
     logger.info("Importing MXF into Windows Media Center: %s", output_path)
     try:
