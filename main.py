@@ -40,6 +40,10 @@ from hdhr_proxy.mxf import (
     run_wmc_post_import_tasks,
 )
 from hdhr_proxy.xmltv import load_xmltv
+from hdhr_proxy.vista_guide import (
+    import_vista_guide_xml,
+    write_vista_guide_xml,
+)
 
 logger = logging.getLogger("main")
 _INSTANCE_GUARDS = []
@@ -114,14 +118,17 @@ def apply_wmc_video_codec_policy(cfg: Config):
     cfg.ffmpeg_output_codec = codec
 
 
-def import_mxf_for_current_wmc(output_path: str, vista_mode: bool = False) -> bool:
+def import_mxf_for_current_wmc(output_path: str, vista_mode: bool = False, vista_xml_path: str = None) -> bool:
     if vista_mode:
-        logger.warning(
-            "Skipping MXF import on Vista. Stock Vista uses the separate ehepg "
-            "guide XML loader; Windows 7+ loadmxf.exe files with mcepg Assembly "
-            "tags are not a Vista import format."
-        )
-        return False
+        if not vista_xml_path:
+            logger.warning(
+                "Skipping Windows 7+ MXF import on Vista. Generate the Vista "
+                "legacy guide XML from XMLTV by running the proxy with an "
+                "XMLTV source and --import-mxf or --import-auto-match-mxf."
+            )
+            return False
+        import_vista_guide_xml(vista_xml_path)
+        return True
     try:
         import_mxf(output_path)
         return True
@@ -342,14 +349,14 @@ def run_proxy(cfg: Config):
     xmltv_data = load_xmltv(cfg.xmltv_file, cfg.xmltv_url, channel_map)
     generated_mxf_path = None
     auto_match_mxf_path = None
+    vista_guide_xml_path = None
     if xmltv_data:
         vista_mode = bool(getattr(cfg, "force_vista_mode", False))
         use_epg123_map = bool(getattr(cfg, "map_guide_wmc", False)) and not vista_mode
         if vista_mode and getattr(cfg, "map_guide_wmc", False):
             logger.warning(
-                "Vista mode cannot import Windows 7+ MXF guide data. Stock Vista "
-                "uses the separate ehepg guide XML loader; channel scanning and "
-                "streaming will continue without changing the Vista guide store."
+                "Vista mode maps guide data through the legacy ehepg XML loader. "
+                "The generated Windows 7+ MXF remains an export artifact only."
             )
         logger.info("Loaded XMLTV guide from %s", xmltv_data.source)
         if cfg.write_mxf or cfg.import_mxf:
@@ -362,7 +369,18 @@ def run_proxy(cfg: Config):
             )
             generated_mxf_path = mxf_path
             if cfg.import_mxf:
-                import_mxf_for_current_wmc(mxf_path, vista_mode=vista_mode)
+                if vista_mode:
+                    vista_guide_xml_path = write_vista_guide_xml(
+                        xmltv_data.filtered_xml,
+                        lineup,
+                        channel_map,
+                        os.path.splitext(cfg.mxf_file)[0] + ".vista.xml",
+                    )
+                import_mxf_for_current_wmc(
+                    mxf_path,
+                    vista_mode=vista_mode,
+                    vista_xml_path=vista_guide_xml_path,
+                )
         elif cfg.mxf_file and os.path.exists(cfg.mxf_file):
             generated_mxf_path = os.path.abspath(cfg.mxf_file)
         if cfg.write_auto_match_mxf or cfg.import_auto_match_mxf or xmltv_data:
@@ -388,7 +406,18 @@ def run_proxy(cfg: Config):
                         import_mxf(auto_match_mxf_path)
                     run_wmc_post_import_tasks()
                 else:
-                    import_mxf_for_current_wmc(auto_match_mxf_path, vista_mode=vista_mode)
+                    if vista_mode and not vista_guide_xml_path:
+                        vista_guide_xml_path = write_vista_guide_xml(
+                            xmltv_data.filtered_xml,
+                            lineup,
+                            channel_map,
+                            os.path.splitext(cfg.auto_match_mxf_file)[0] + ".vista.xml",
+                        )
+                    import_mxf_for_current_wmc(
+                        auto_match_mxf_path,
+                        vista_mode=vista_mode,
+                        vista_xml_path=vista_guide_xml_path,
+                    )
         guide_rows = build_guide_match_rows(
             lineup,
             channel_map,

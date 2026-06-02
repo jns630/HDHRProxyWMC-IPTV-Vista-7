@@ -322,6 +322,7 @@ def _build_channel_metadata(
             "guide_number": guide_number,
             "major": major,
             "minor": minor,
+            "physical_channel": int(item.get("PhysicalChannel") or major),
             "service_id": service_id,
             "station_id": _lookup_station_id(epg123_station_ids, scanned_call_sign, station_id),
             "xmltv_id": xmltv_id,
