@@ -113,6 +113,17 @@ def apply_wmc_video_codec_policy(cfg: Config):
     cfg.ffmpeg_output_codec = codec
 
 
+def import_mxf_for_current_wmc(output_path: str, vista_mode: bool = False) -> bool:
+    try:
+        import_mxf(output_path)
+        return True
+    except RuntimeError as exc:
+        if not vista_mode:
+            raise
+        logger.warning("Skipping Vista MXF import: %s", exc)
+        return False
+
+
 def configure_windows_hdhr_sources(cfg: Config):
     if platform.system() != "Windows":
         return
@@ -342,7 +353,7 @@ def run_proxy(cfg: Config):
             )
             generated_mxf_path = mxf_path
             if cfg.import_mxf:
-                import_mxf(mxf_path)
+                import_mxf_for_current_wmc(mxf_path, vista_mode=vista_mode)
         elif cfg.mxf_file and os.path.exists(cfg.mxf_file):
             generated_mxf_path = os.path.abspath(cfg.mxf_file)
         if cfg.write_auto_match_mxf or cfg.import_auto_match_mxf or xmltv_data:
@@ -368,7 +379,7 @@ def run_proxy(cfg: Config):
                         import_mxf(auto_match_mxf_path)
                     run_wmc_post_import_tasks()
                 else:
-                    import_mxf(auto_match_mxf_path)
+                    import_mxf_for_current_wmc(auto_match_mxf_path, vista_mode=vista_mode)
         guide_rows = build_guide_match_rows(
             lineup,
             channel_map,

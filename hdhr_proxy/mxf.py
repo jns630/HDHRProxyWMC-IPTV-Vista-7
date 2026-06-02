@@ -175,9 +175,19 @@ def write_mxf(
 
 
 def import_mxf(output_path: str) -> None:
-    loadmxf = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "ehome", "loadmxf.exe")
+    ehome_dir = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "ehome")
+    loadmxf = os.path.join(ehome_dir, "loadmxf.exe")
     if not os.path.exists(loadmxf):
         raise FileNotFoundError(f"loadmxf.exe not found at {loadmxf}")
+    if _mxf_requires_mcepg(output_path) and not os.path.exists(os.path.join(ehome_dir, "mcepg.dll")):
+        raise RuntimeError(
+            "This MXF guide requires mcepg.dll, but this Windows Media Center "
+            "installation does not provide it. Stock Windows Vista cannot "
+            "import the Windows 7-style guide MXF. Install the Vista Media "
+            "Center TV Pack 2008 guide components, or run the proxy without "
+            "--import-mxf/--import-auto-match-mxf. Renaming the assembly to "
+            "nettv is not compatible with guide listings."
+        )
     logger.info("Importing MXF into Windows Media Center: %s", output_path)
     try:
         subprocess.run([loadmxf, "-v", "-i", output_path], check=True)
@@ -187,6 +197,17 @@ def import_mxf(output_path: str) -> None:
             "elevated Administrator command prompt and keep the MXF file in a "
             "user-writable folder such as C:\\Temp."
         ) from exc
+
+
+def _mxf_requires_mcepg(output_path: str) -> bool:
+    try:
+        root = ET.parse(output_path).getroot()
+    except (ET.ParseError, OSError):
+        return False
+    return any(
+        assembly.attrib.get("name", "").strip().lower() == "mcepg"
+        for assembly in root.findall("./Assembly")
+    )
 
 
 def run_wmc_post_import_tasks() -> None:
