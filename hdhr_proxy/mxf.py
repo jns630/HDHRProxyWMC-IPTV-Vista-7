@@ -190,13 +190,38 @@ def import_mxf(output_path: str) -> None:
         )
     logger.info("Importing MXF into Windows Media Center: %s", output_path)
     try:
-        subprocess.run([loadmxf, "-v", "-i", output_path], check=True)
+        result = subprocess.run(
+            [loadmxf, "-v", "-i", output_path],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+        )
+        _log_loadmxf_output(result.stdout, result.stderr)
     except PermissionError as exc:
-        raise PermissionError(
-            "Windows Media Center denied the MXF import. Run the proxy from an "
-            "elevated Administrator command prompt and keep the MXF file in a "
-            "user-writable folder such as C:\\Temp."
-        ) from exc
+        raise PermissionError(_loadmxf_access_denied_message()) from exc
+    except subprocess.CalledProcessError as exc:
+        _log_loadmxf_output(exc.stdout, exc.stderr)
+        output = "\n".join(part for part in (exc.stdout, exc.stderr) if part).strip()
+        if "access denied" in output.lower():
+            raise PermissionError(_loadmxf_access_denied_message()) from exc
+        raise
+
+
+def _loadmxf_access_denied_message() -> str:
+    return (
+        "Windows Media Center denied the MXF import. Run the proxy from an "
+        "elevated Administrator command prompt, keep the MXF file in a "
+        "user-writable folder such as C:\\Temp, and close Windows Media Center "
+        "before importing."
+    )
+
+
+def _log_loadmxf_output(stdout: Optional[str], stderr: Optional[str]) -> None:
+    for stream_name, output in (("stdout", stdout), ("stderr", stderr)):
+        for line in (output or "").splitlines():
+            if line.strip():
+                logger.info("loadmxf %s: %s", stream_name, line)
 
 
 def _mxf_requires_mcepg(output_path: str) -> bool:

@@ -18,6 +18,7 @@ import logging
 import os
 import platform
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -117,7 +118,7 @@ def import_mxf_for_current_wmc(output_path: str, vista_mode: bool = False) -> bo
     try:
         import_mxf(output_path)
         return True
-    except RuntimeError as exc:
+    except (RuntimeError, PermissionError, subprocess.CalledProcessError) as exc:
         if not vista_mode:
             raise
         logger.warning("Skipping Vista MXF import: %s", exc)
