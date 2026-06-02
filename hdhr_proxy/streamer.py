@@ -16,6 +16,8 @@ STREAM_READ_CHUNK = 131072  # 128KB
 FFMPEG_READ_TIMEOUT = 5.0
 FFMPEG_ANALYZE_US = "5000000"
 FFMPEG_PROBE_BYTES = "5000000"
+VISTA_FRAME_SIZE = "352x240"
+VISTA_VIDEO_BITRATE_BPS = 2500000
 FFMPEG_INPUT_OPTIONS = [
     "-fflags", "+genpts+discardcorrupt",
     "-flags", "low_delay",
@@ -51,6 +53,17 @@ def _hls_profile_bitrate(bitrate: str) -> str:
     if suffix == "k":
         return f"{amount + 500}k"
     return str(amount + 500)
+
+
+def _vista_profile_bitrate(bitrate: str) -> str:
+    text = str(bitrate or "").strip().lower()
+    match = re.match(r"^(\d+)([km]?)$", text)
+    if not match:
+        return "2500k"
+    amount = int(match.group(1))
+    suffix = match.group(2) or "k"
+    bitrate_bps = amount * (1000000 if suffix == "m" else 1000)
+    return bitrate if bitrate_bps <= VISTA_VIDEO_BITRATE_BPS else "2500k"
 
 
 def _resolve_hls_source_url(source_url: str) -> str:
@@ -103,7 +116,7 @@ def _should_keep_original_hls_url(source_url: str, playback_url: str) -> bool:
 
 def video_encoder_args(output_codec: str, bitrate: str, use_hls_profile: bool = False, vista_mode: bool = False):
     codec = (output_codec or "mpeg2video").lower()
-    frame_size = "640x360" if vista_mode else "1280x720"
+    frame_size = VISTA_FRAME_SIZE if vista_mode else "1280x720"
     bitrate_text = str(bitrate or "").strip().lower()
     match = re.match(r"^(\d+)([km]?)$", bitrate_text)
     if match:
@@ -205,7 +218,9 @@ def ffmpeg_transcode_stream(
 ):
     source_url = _resolve_hls_source_url(source_url)
     use_hls_profile = _is_hls_like_source(source_url)
-    effective_bitrate = _hls_profile_bitrate(bitrate) if use_hls_profile and not vista_mode else bitrate
+    effective_bitrate = _vista_profile_bitrate(bitrate) if vista_mode else (
+        _hls_profile_bitrate(bitrate) if use_hls_profile else bitrate
+    )
     cmd = [
         ffmpeg_path,
         "-hide_banner",

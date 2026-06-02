@@ -993,7 +993,9 @@ class DiscoveryServer:
         return amount
 
     def _effective_bitrate(self, source_url: str) -> str:
-        if self.force_vista_mode or not self._uses_hls_quality_profile(source_url):
+        if self.force_vista_mode:
+            return self._vista_profile_bitrate(self.bitrate)
+        if not self._uses_hls_quality_profile(source_url):
             return self.bitrate
         text = str(self.bitrate or "").strip().lower()
         match = re.match(r"^(\d+)([km]?)$", text)
@@ -1006,6 +1008,10 @@ class DiscoveryServer:
         if suffix == "k":
             return f"{amount + 500}k"
         return str(amount + 500)
+
+    def _vista_profile_bitrate(self, bitrate: str) -> str:
+        bitrate_bps = self._bitrate_to_bps(bitrate)
+        return bitrate if bitrate_bps <= 2500000 else "2500k"
 
     def _uses_hls_quality_profile(self, source_url: str) -> bool:
         parsed = urllib.parse.urlparse(source_url or "")
@@ -2601,7 +2607,7 @@ class DiscoveryServer:
     def _video_encoder_args(self, effective_bitrate: str, use_hls_profile: bool = False) -> List[str]:
         codec = (self.output_codec or "mpeg2video").lower()
         vista_mode = bool(getattr(self, "force_vista_mode", False))
-        frame_size = "640x360" if vista_mode else "1280x720"
+        frame_size = "352x240" if vista_mode else "1280x720"
         video_bufsize = f"{max(self._bitrate_to_bps(effective_bitrate) // 500, 1000)}k"
         common = [
             "-pix_fmt", "yuv420p",
