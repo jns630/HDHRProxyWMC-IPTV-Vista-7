@@ -498,6 +498,7 @@ This project is tuned for Windows Media Center-style discovery and playback:
 - It reports a digital antenna source.
 - It creates ATSC-style channel metadata and broadcast frequencies.
 - It packs large M3U playlists into adaptive scanned RF subchannels based on the parsed channel count, supporting up to 1024 generated channels.
+- It advertises virtual channels starting at `2.1` while carrying them on UHF RF `14-59`, matching the frequencies scanned reliably by Vista and Windows 7 WMC antenna setup.
 - It can write registry values for SiliconDust tuner source defaults.
 - It keeps Vista on MPEG-2 video for compatibility, and switches Windows 7 or newer to H.264/MPEG-4 AVC video for WMC playback.
 - It uses AC-3 stereo audio and MPEG-TS output for WMC streams.

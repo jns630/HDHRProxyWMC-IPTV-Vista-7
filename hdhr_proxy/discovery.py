@@ -818,11 +818,9 @@ class DiscoveryServer:
             low_freq = int(item.get("LowFreq") or frequency - 3000000)
             high_freq = int(item.get("HighFreq") or frequency + 3000000)
             guide = str(guide_number)
-            if "." in guide:
-                major, minor = guide.split(".", 1)
-            else:
-                major = str(item.get("VirtualMajor") or physical_channel)
-                minor = str(item.get("VirtualMinor") or 1)
+            guide_parts = guide.split(".", 1)
+            major = str(item.get("VirtualMajor") or guide_parts[0] or physical_channel)
+            minor = str(item.get("VirtualMinor") or (guide_parts[1] if len(guide_parts) > 1 else 1))
             program_number = int(item.get("ProgramNumber") or ATSC_PROGRAM_NUMBER)
             original_pmt_pid = int(item.get("PMTPID") or 0x31)
             original_video_pid = int(item.get("VideoPID") or 0x41)

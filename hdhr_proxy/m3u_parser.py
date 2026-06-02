@@ -7,8 +7,9 @@ from typing import List, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-US_BCAST_FIRST_PHYSICAL_CHANNEL = 2
+US_BCAST_FIRST_PHYSICAL_CHANNEL = 14
 US_BCAST_LAST_PHYSICAL_CHANNEL = 59
+VIRTUAL_FIRST_MAJOR_CHANNEL = 2
 VIRTUAL_PROGRAMS_PER_PHYSICAL_CHANNEL = 16
 VIRTUAL_FIRST_PROGRAM_NUMBER = 3
 MPEGTS_DYNAMIC_PID_BASE = 0x30
@@ -323,7 +324,8 @@ def build_lineup(
         else:
             physical_channel, virtual_minor = _virtual_rf_assignment_for_index(i, len(channels), max_physical_channel)
         program_number = VIRTUAL_FIRST_PROGRAM_NUMBER + virtual_minor - 1
-        guide_number = ch.tvg_chno or mapping.get(ch.name, "") or f"{physical_channel}.{virtual_minor}"
+        virtual_major = _virtual_major_for_physical_channel(physical_channel)
+        guide_number = ch.tvg_chno or mapping.get(ch.name, "") or f"{virtual_major}.{virtual_minor}"
         frequency = _us_bcast_frequency_for_physical_channel(physical_channel)
         low_freq = frequency - 3000000
         high_freq = frequency + 3000000
@@ -344,7 +346,7 @@ def build_lineup(
             "URL": url,
             "Modulation": "8vsb",
             "PhysicalChannel": physical_channel,
-            "VirtualMajor": physical_channel,
+            "VirtualMajor": virtual_major,
             "VirtualMinor": virtual_minor,
             "Frequency": frequency,
             "LowFreq": low_freq,
@@ -448,6 +450,10 @@ def _physical_channel_for_index(
 def _physical_channel_count(max_physical_channel: int = US_BCAST_LAST_PHYSICAL_CHANNEL) -> int:
     max_physical_channel = max(US_BCAST_FIRST_PHYSICAL_CHANNEL, min(int(max_physical_channel), US_BCAST_LAST_PHYSICAL_CHANNEL))
     return max_physical_channel - US_BCAST_FIRST_PHYSICAL_CHANNEL + 1
+
+
+def _virtual_major_for_physical_channel(physical_channel: int) -> int:
+    return VIRTUAL_FIRST_MAJOR_CHANNEL + int(physical_channel) - US_BCAST_FIRST_PHYSICAL_CHANNEL
 
 
 def _program_number_for_index(index: int, programs_per_physical: int = VIRTUAL_PROGRAMS_PER_PHYSICAL_CHANNEL) -> int:
