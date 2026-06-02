@@ -121,7 +121,7 @@ def apply_wmc_video_codec_policy(cfg: Config):
 def import_mxf_for_current_wmc(output_path: str, vista_mode: bool = False, vista_xml_path: str = None) -> bool:
     if vista_mode:
         try:
-            import_mxf(output_path)
+            import_mxf(output_path, vista_tv_pack=True)
             logger.info("Imported MXF through the installed Vista TV Pack loadmxf.exe.")
             return True
         except FileNotFoundError:

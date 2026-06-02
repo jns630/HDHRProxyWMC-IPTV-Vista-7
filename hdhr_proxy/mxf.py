@@ -1,7 +1,10 @@
 import hashlib
+import glob
 import logging
 import os
+import shutil
 import subprocess
+import tempfile
 import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
@@ -182,7 +185,7 @@ def write_mxf(
     return output_path
 
 
-def import_mxf(output_path: str) -> None:
+def import_mxf(output_path: str, vista_tv_pack: bool = False) -> None:
     ehome_dir = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "ehome")
     loadmxf = os.path.join(ehome_dir, "loadmxf.exe")
     if not os.path.exists(loadmxf):
@@ -195,10 +198,66 @@ def import_mxf(output_path: str) -> None:
             "cannot import this MXF file. Renaming the Assembly tag to nettv "
             "or ehepg does not convert the document to the Vista guide XML format."
         )
+    output_path = os.path.abspath(output_path)
+    if vista_tv_pack:
+        _import_vista_tv_pack_mxf(loadmxf, output_path)
+        return
     logger.info("Importing MXF into Windows Media Center: %s", output_path)
+    _run_loadmxf(loadmxf, output_path)
+
+
+def _import_vista_tv_pack_mxf(loadmxf: str, output_path: str) -> None:
+    stores = _vista_tv_pack_store_candidates()
+    staged_path = _stage_mxf_for_import(output_path)
+    try:
+        if stores:
+            logger.info("Vista TV Pack guide stores found: %s", ", ".join(stores))
+            last_error = None
+            for store_path in stores:
+                try:
+                    logger.info("Importing Vista TV Pack MXF into explicit guide store: %s", store_path)
+                    _run_loadmxf(loadmxf, staged_path, store_path=store_path)
+                    return
+                except (PermissionError, subprocess.CalledProcessError) as exc:
+                    last_error = exc
+                    logger.warning("Vista TV Pack MXF import attempt failed for %s: %s", store_path, exc)
+            if last_error:
+                raise last_error
+        logger.info("No Vista TV Pack mcepg*.db store was found; trying loadmxf.exe default store discovery.")
+        _run_loadmxf(loadmxf, staged_path)
+    finally:
+        try:
+            os.remove(staged_path)
+        except OSError:
+            pass
+
+
+def _vista_tv_pack_store_candidates() -> List[str]:
+    program_data = os.environ.get("ProgramData", r"C:\ProgramData")
+    store_dir = os.path.join(program_data, "Microsoft", "eHome")
+    candidates = [
+        path for path in glob.glob(os.path.join(store_dir, "mcepg*.db"))
+        if os.path.isfile(path)
+    ]
+    return sorted(candidates, key=lambda path: os.path.getmtime(path), reverse=True)
+
+
+def _stage_mxf_for_import(output_path: str) -> str:
+    fd, staged_path = tempfile.mkstemp(prefix="hdhrproxy-", suffix=".mxf")
+    os.close(fd)
+    shutil.copyfile(output_path, staged_path)
+    logger.info("Staged MXF for local Media Center import: %s", staged_path)
+    return staged_path
+
+
+def _run_loadmxf(loadmxf: str, output_path: str, store_path: Optional[str] = None) -> None:
+    cmd = [loadmxf, "-v"]
+    if store_path:
+        cmd.extend(["-s", store_path])
+    cmd.extend(["-i", output_path])
     try:
         result = subprocess.run(
-            [loadmxf, "-v", "-i", output_path],
+            cmd,
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -217,10 +276,10 @@ def import_mxf(output_path: str) -> None:
 
 def _loadmxf_access_denied_message() -> str:
     return (
-        "Windows Media Center denied the MXF import. Run the proxy from an "
-        "elevated Administrator command prompt, keep the MXF file in a "
-        "user-writable folder such as C:\\Temp, and close Windows Media Center "
-        "before importing."
+        "Windows Media Center denied the MXF import. On Vista TV Pack this can "
+        "mean its mcepg database ACL or store state is damaged even when the "
+        "proxy is elevated. Close Windows Media Center and inspect the logged "
+        "explicit mcepg*.db store path."
     )
 
 
