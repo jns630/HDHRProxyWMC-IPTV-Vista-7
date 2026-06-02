@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.IO;
 using System.Reflection;
 using System.Xml;
@@ -37,25 +38,40 @@ internal static class VistaGuideImport
 
             string ehome = Path.Combine(Environment.GetEnvironmentVariable("WINDIR") ?? @"C:\Windows", "ehome");
             Log("Vista eHome folder: " + ehome);
+            Assembly ehepg = LoadEhepg(ehome);
+            Hashtable resolving = new Hashtable();
             AppDomain.CurrentDomain.AssemblyResolve += delegate(object sender, ResolveEventArgs e)
             {
-                Log("Resolving dependency: " + e.Name);
-                string candidate = Path.Combine(ehome, new AssemblyName(e.Name).Name + ".dll");
-                if (File.Exists(candidate))
+                string simpleName = new AssemblyName(e.Name).Name;
+                if (resolving.ContainsKey(simpleName))
                 {
-                    Log("Loading dependency from eHome: " + candidate);
-                    return Assembly.LoadFrom(candidate);
+                    Log("Skipping recursive dependency resolution: " + e.Name);
+                    return null;
                 }
+                resolving[simpleName] = true;
+                try
+                {
+                    Log("Resolving dependency: " + e.Name);
+                    string candidate = Path.Combine(ehome, simpleName + ".dll");
+                    if (File.Exists(candidate))
+                    {
+                        Log("Loading dependency from eHome: " + candidate);
+                        return Assembly.LoadFrom(candidate);
+                    }
 #pragma warning disable 618
-                Assembly registered = Assembly.LoadWithPartialName(new AssemblyName(e.Name).Name);
+                    Assembly registered = Assembly.LoadWithPartialName(simpleName);
 #pragma warning restore 618
-                Log(registered == null
-                    ? "Registered dependency was not found: " + e.Name
-                    : "Loaded registered dependency: " + registered.FullName);
-                return registered;
+                    Log(registered == null
+                        ? "Registered dependency was not found: " + e.Name
+                        : "Loaded registered dependency: " + registered.FullName);
+                    return registered;
+                }
+                finally
+                {
+                    resolving.Remove(simpleName);
+                }
             };
 
-            Assembly ehepg = LoadEhepg(ehome);
             Log("Resolving required Vista ehepg types.");
             Type security = RequireType(ehepg, "Microsoft.Ehome.Epg.Helper.EpgSecurity");
             Type fileHelper = RequireType(ehepg, "Microsoft.Ehome.Epg.Helper.EpgFileHelper");
@@ -160,6 +176,20 @@ internal static class VistaGuideImport
 
     private static Assembly LoadEhepg(string ehome)
     {
+        try
+        {
+            Log("Attempting strong-name Vista ehepg GAC load.");
+            Assembly registered = Assembly.Load(
+                "ehepg, Version=6.0.6000.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35"
+            );
+            Log("Loaded registered Vista ehepg assembly: " + registered.FullName);
+            return registered;
+        }
+        catch (Exception ex)
+        {
+            Log("Strong-name ehepg assembly load failed: " + ex.Message);
+        }
+
         try
         {
             Log("Attempting registered Vista ehepg assembly load.");
