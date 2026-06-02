@@ -379,8 +379,8 @@ def run_proxy(cfg: Config):
         use_epg123_map = bool(getattr(cfg, "map_guide_wmc", False)) and not vista_mode
         if vista_mode and getattr(cfg, "map_guide_wmc", False):
             logger.warning(
-                "Vista mode maps guide data through the legacy ehepg XML loader. "
-                "The generated Windows 7+ MXF remains an export artifact only."
+                "Vista mode maps guide data through TV Pack loadmxf.exe when "
+                "available, with the legacy ehepg XML loader as a pre-TV-Pack fallback."
             )
         logger.info("Loaded XMLTV guide from %s", xmltv_data.source)
         if cfg.write_mxf or cfg.import_mxf:
