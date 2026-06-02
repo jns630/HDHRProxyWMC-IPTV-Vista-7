@@ -32,14 +32,14 @@ internal static class VistaGuideImport
             AppDomain.CurrentDomain.AssemblyResolve += delegate(object sender, ResolveEventArgs e)
             {
                 string candidate = Path.Combine(ehome, new AssemblyName(e.Name).Name + ".dll");
-                return File.Exists(candidate) ? Assembly.LoadFrom(candidate) : null;
+                if (File.Exists(candidate))
+                    return Assembly.LoadFrom(candidate);
+#pragma warning disable 618
+                return Assembly.LoadWithPartialName(new AssemblyName(e.Name).Name);
+#pragma warning restore 618
             };
 
-            string ehepgPath = Path.Combine(ehome, "ehepg.dll");
-            if (!File.Exists(ehepgPath))
-                throw new FileNotFoundException("Vista ehepg.dll was not found.", ehepgPath);
-
-            Assembly ehepg = Assembly.LoadFrom(ehepgPath);
+            Assembly ehepg = LoadEhepg(ehome);
             Type security = RequireType(ehepg, "Microsoft.Ehome.Epg.Helper.EpgSecurity");
             Type fileHelper = RequireType(ehepg, "Microsoft.Ehome.Epg.Helper.EpgFileHelper");
             Type managerType = RequireType(ehepg, "Microsoft.Ehome.Epg.Loader.GuideLoadManager");
@@ -133,6 +133,38 @@ internal static class VistaGuideImport
         if (type == null)
             throw new TypeLoadException("Missing Vista ehepg type: " + name);
         return type;
+    }
+
+    private static Assembly LoadEhepg(string ehome)
+    {
+        try
+        {
+#pragma warning disable 618
+            Assembly registered = Assembly.LoadWithPartialName("ehepg");
+#pragma warning restore 618
+            if (registered != null)
+            {
+                Log("Loaded registered Vista ehepg assembly: " + registered.FullName);
+                return registered;
+            }
+        }
+        catch (Exception ex)
+        {
+            Log("Registered ehepg assembly load failed: " + ex.Message);
+        }
+
+        string path = Path.Combine(ehome, "ehepg.dll");
+        if (File.Exists(path))
+        {
+            Log("Loading Vista ehepg assembly from: " + path);
+            return Assembly.LoadFrom(path);
+        }
+
+        throw new FileNotFoundException(
+            "Vista ehepg assembly was not found in the GAC or C:\\Windows\\ehome. " +
+            "ehepgnet.dll alone is not the guide-store assembly.",
+            path
+        );
     }
 
     private static void Log(string message)
