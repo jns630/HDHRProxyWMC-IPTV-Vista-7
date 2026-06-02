@@ -9,6 +9,10 @@ internal static class VistaGuideImport
 
     private static int Main(string[] args)
     {
+        AppDomain.CurrentDomain.UnhandledException += delegate(object sender, UnhandledExceptionEventArgs e)
+        {
+            Log("UNHANDLED: " + (e.ExceptionObject == null ? "<null>" : e.ExceptionObject.ToString()));
+        };
         try
         {
             if (args.Length == 2 && args[0] == "--validate")
@@ -25,24 +29,38 @@ internal static class VistaGuideImport
 
             _logPath = args[1];
             string xmlPath = Path.GetFullPath(args[0]);
+            Log("Helper process started. Runtime=" + Environment.Version + " OS=" + Environment.OSVersion);
+            Log("Validating Vista guide XML: " + xmlPath);
             ValidateXml(xmlPath);
+            Log("Vista guide XML validation passed.");
             Log("Starting Vista ehepg import: " + xmlPath);
 
             string ehome = Path.Combine(Environment.GetEnvironmentVariable("WINDIR") ?? @"C:\Windows", "ehome");
+            Log("Vista eHome folder: " + ehome);
             AppDomain.CurrentDomain.AssemblyResolve += delegate(object sender, ResolveEventArgs e)
             {
+                Log("Resolving dependency: " + e.Name);
                 string candidate = Path.Combine(ehome, new AssemblyName(e.Name).Name + ".dll");
                 if (File.Exists(candidate))
+                {
+                    Log("Loading dependency from eHome: " + candidate);
                     return Assembly.LoadFrom(candidate);
+                }
 #pragma warning disable 618
-                return Assembly.LoadWithPartialName(new AssemblyName(e.Name).Name);
+                Assembly registered = Assembly.LoadWithPartialName(new AssemblyName(e.Name).Name);
 #pragma warning restore 618
+                Log(registered == null
+                    ? "Registered dependency was not found: " + e.Name
+                    : "Loaded registered dependency: " + registered.FullName);
+                return registered;
             };
 
             Assembly ehepg = LoadEhepg(ehome);
+            Log("Resolving required Vista ehepg types.");
             Type security = RequireType(ehepg, "Microsoft.Ehome.Epg.Helper.EpgSecurity");
             Type fileHelper = RequireType(ehepg, "Microsoft.Ehome.Epg.Helper.EpgFileHelper");
             Type managerType = RequireType(ehepg, "Microsoft.Ehome.Epg.Loader.GuideLoadManager");
+            Log("Required Vista ehepg types resolved.");
 
             string encryptedPath = Path.Combine(Path.GetTempPath(), "hdhrproxy-" + Guid.NewGuid().ToString("N") + ".sdf");
             try
@@ -53,18 +71,23 @@ internal static class VistaGuideImport
                 ).Invoke(null, new object[] { xmlPath, encryptedPath });
                 if (!encrypted)
                     throw new InvalidOperationException("Vista EpgSecurity.EncryptFile returned false.");
+                Log("Encrypted Vista guide XML: " + encryptedPath);
 
+                Log("Resolving Vista current EPG database.");
                 string databasePath = (string)fileHelper.GetProperty(
                     "CurrentEpgFile",
                     BindingFlags.Public | BindingFlags.Static
                 ).GetValue(null, null);
                 if (String.IsNullOrEmpty(databasePath))
                     throw new InvalidOperationException("Vista EpgFileHelper.CurrentEpgFile returned no database path.");
+                Log("Vista current EPG database: " + databasePath);
 
+                Log("Creating Vista GuideLoadManager.");
                 ConstructorInfo managerCtor = managerType.GetConstructors(
                     BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance
                 )[0];
                 object manager = managerCtor.Invoke(new object[] { null });
+                Log("Calling Vista GuideLoadManager.LoadXmlFile.");
                 MethodInfo loadXml = managerType.GetMethod(
                     "LoadXmlFile",
                     BindingFlags.Public | BindingFlags.Instance
@@ -139,6 +162,7 @@ internal static class VistaGuideImport
     {
         try
         {
+            Log("Attempting registered Vista ehepg assembly load.");
 #pragma warning disable 618
             Assembly registered = Assembly.LoadWithPartialName("ehepg");
 #pragma warning restore 618

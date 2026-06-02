@@ -127,8 +127,16 @@ def import_mxf_for_current_wmc(output_path: str, vista_mode: bool = False, vista
                 "XMLTV source and --import-mxf or --import-auto-match-mxf."
             )
             return False
-        import_vista_guide_xml(vista_xml_path)
-        return True
+        try:
+            import_vista_guide_xml(vista_xml_path)
+            return True
+        except (OSError, subprocess.CalledProcessError) as exc:
+            logger.warning(
+                "Vista ehepg guide import failed, but the proxy will continue "
+                "running for scanning and playback. Check vista_guide_import.log. %s",
+                exc,
+            )
+            return False
     try:
         import_mxf(output_path)
         return True
