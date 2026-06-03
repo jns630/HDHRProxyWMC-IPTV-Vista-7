@@ -525,7 +525,7 @@ Import that file from an elevated prompt or by using Registry Editor as Administ
 
 ffmpeg is used to turn a wide range of IPTV/HLS sources into a WMC-friendly MPEG-TS stream. The proxy applies an OS-aware video codec policy at startup:
 
-- Windows Vista / Windows version `6.0`: MPEG-2 video (`mpeg2video`)
+- Windows Vista / Windows version `6.0`: light MPEG-2 video (`mpeg2video`) at 640x360
 - Windows 7 or newer / Windows version `6.1+`: H.264/MPEG-4 AVC video (`libx264`)
 - AC-3 stereo audio
 - 1280x720 output
