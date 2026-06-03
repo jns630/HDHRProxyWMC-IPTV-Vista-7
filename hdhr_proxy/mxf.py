@@ -208,28 +208,29 @@ def import_mxf(output_path: str, vista_tv_pack: bool = False) -> None:
 
 def _import_vista_tv_pack_mxf(loadmxf: str, output_path: str) -> None:
     stores = _vista_tv_pack_store_candidates()
+    if stores:
+        logger.info("Vista TV Pack guide stores found: %s", ", ".join(stores))
+        last_error = None
+        for store_path in stores:
+            staged_path = _stage_mxf_for_import(output_path, os.path.dirname(store_path))
+            try:
+                logger.info("Importing Vista TV Pack MXF into explicit guide store: %s", store_path)
+                _run_vista_loadmxf_attempts(loadmxf, staged_path, store_path)
+                return
+            except (PermissionError, subprocess.CalledProcessError) as exc:
+                last_error = exc
+                logger.warning("Vista TV Pack MXF import attempt failed for %s: %s", store_path, exc)
+            finally:
+                _remove_staged_mxf(staged_path)
+        if last_error:
+            raise last_error
+
     staged_path = _stage_mxf_for_import(output_path)
     try:
-        if stores:
-            logger.info("Vista TV Pack guide stores found: %s", ", ".join(stores))
-            last_error = None
-            for store_path in stores:
-                try:
-                    logger.info("Importing Vista TV Pack MXF into explicit guide store: %s", store_path)
-                    _run_loadmxf(loadmxf, staged_path, store_path=store_path)
-                    return
-                except (PermissionError, subprocess.CalledProcessError) as exc:
-                    last_error = exc
-                    logger.warning("Vista TV Pack MXF import attempt failed for %s: %s", store_path, exc)
-            if last_error:
-                raise last_error
         logger.info("No Vista TV Pack mcepg*.db store was found; trying loadmxf.exe default store discovery.")
         _run_loadmxf(loadmxf, staged_path)
     finally:
-        try:
-            os.remove(staged_path)
-        except OSError:
-            pass
+        _remove_staged_mxf(staged_path)
 
 
 def _vista_tv_pack_store_candidates() -> List[str]:
@@ -242,12 +243,44 @@ def _vista_tv_pack_store_candidates() -> List[str]:
     return sorted(candidates, key=lambda path: os.path.getmtime(path), reverse=True)
 
 
-def _stage_mxf_for_import(output_path: str) -> str:
-    fd, staged_path = tempfile.mkstemp(prefix="hdhrproxy-", suffix=".mxf")
+def _stage_mxf_for_import(output_path: str, preferred_dir: Optional[str] = None) -> str:
+    temp_dir = preferred_dir if preferred_dir and os.path.isdir(preferred_dir) else None
+    fd, staged_path = tempfile.mkstemp(prefix="hdhrproxy-", suffix=".mxf", dir=temp_dir)
     os.close(fd)
-    shutil.copyfile(output_path, staged_path)
-    logger.info("Staged MXF for local Media Center import: %s", staged_path)
-    return staged_path
+    try:
+        shutil.copyfile(output_path, staged_path)
+        logger.info("Staged MXF for local Media Center import: %s", staged_path)
+        return staged_path
+    except OSError as exc:
+        _remove_staged_mxf(staged_path)
+        if not temp_dir:
+            raise
+        logger.warning("Could not stage MXF beside the Vista guide store; falling back to %%TEMP%%. %s", exc)
+        return _stage_mxf_for_import(output_path)
+
+
+def _remove_staged_mxf(staged_path: str) -> None:
+    try:
+        os.remove(staged_path)
+    except OSError:
+        pass
+
+
+def _run_vista_loadmxf_attempts(loadmxf: str, output_path: str, store_path: str) -> None:
+    commands = [
+        [loadmxf, "-v", "-i", output_path, "-s", store_path],
+        [loadmxf, "-v", "-s", store_path, "-i", output_path],
+    ]
+    last_error = None
+    for cmd in commands:
+        try:
+            _run_loadmxf_command(cmd)
+            return
+        except (PermissionError, subprocess.CalledProcessError) as exc:
+            last_error = exc
+            logger.warning("Vista TV Pack loadmxf command failed: %s", exc)
+    if last_error:
+        raise last_error
 
 
 def _run_loadmxf(loadmxf: str, output_path: str, store_path: Optional[str] = None) -> None:
@@ -255,6 +288,11 @@ def _run_loadmxf(loadmxf: str, output_path: str, store_path: Optional[str] = Non
     if store_path:
         cmd.extend(["-s", store_path])
     cmd.extend(["-i", output_path])
+    _run_loadmxf_command(cmd)
+
+
+def _run_loadmxf_command(cmd: List[str]) -> None:
+    logger.info("Running loadmxf command: %s", _format_command_for_log(cmd))
     try:
         result = subprocess.run(
             cmd,
@@ -262,6 +300,7 @@ def _run_loadmxf(loadmxf: str, output_path: str, store_path: Optional[str] = Non
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             universal_newlines=True,
+            cwd=os.path.dirname(cmd[0]) or None,
         )
         _log_loadmxf_output(result.stdout, result.stderr)
     except PermissionError as exc:
@@ -272,6 +311,10 @@ def _run_loadmxf(loadmxf: str, output_path: str, store_path: Optional[str] = Non
         if "access denied" in output.lower():
             raise PermissionError(_loadmxf_access_denied_message()) from exc
         raise
+
+
+def _format_command_for_log(cmd: List[str]) -> str:
+    return " ".join('"%s"' % part if " " in str(part) else str(part) for part in cmd)
 
 
 def _loadmxf_access_denied_message() -> str:

@@ -277,7 +277,7 @@ The proxy can also convert XMLTV into a Windows Media Center MXF file and option
 
 Vista TV Pack 2008 uses its installed `loadmxf.exe` and `mcepg.dll` guide store. Stock pre-TV-Pack Vista uses its older `ehepg` guide XML loader instead. When `--vista` is combined with an import option, the proxy also writes a sibling `*.vista.xml` fallback file with Vista ATSC RF/subchannel tuning data for that older loader.
 
-For Vista TV Pack, the importer stages the MXF under `%TEMP%` and passes the newest `%ProgramData%\Microsoft\eHome\mcepg*.db` file to `loadmxf.exe` with its documented `-s` option. This avoids TV Pack's unreliable default-store discovery and logs each explicit store attempt for diagnosis.
+For Vista TV Pack, the importer stages the MXF beside each `%ProgramData%\Microsoft\eHome\mcepg*.db` candidate when possible and passes that store to `loadmxf.exe` with its documented `-s` option. It tries both accepted argument orders from the eHome working directory and logs each command for diagnosis.
 
 Generate `guide.mxf`:
 
