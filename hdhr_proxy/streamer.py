@@ -230,7 +230,6 @@ def ffmpeg_transcode_stream(
         "-flags", "low_delay",
         "-analyzeduration", FFMPEG_ANALYZE_US,
         "-probesize", FFMPEG_PROBE_BYTES,
-        "-allowed_extensions", "ALL",
         "-protocol_whitelist", "file,http,https,tcp,tls,crypto,udp,rtp",
         "-reconnect_at_eof", "1",
         "-reconnect_streamed", "1",
@@ -247,7 +246,7 @@ def ffmpeg_transcode_stream(
         "-i", source_url,
         "-map", "0:v:0?",
         "-map", "0:a:0?",
-        "-vsync", "cfr",
+        "-fps_mode", "cfr",
         "-dn",
         "-sn",
     ])
