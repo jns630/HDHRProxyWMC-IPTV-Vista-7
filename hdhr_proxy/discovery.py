@@ -2574,7 +2574,7 @@ class DiscoveryServer:
         output_args = [
             "-map", video_map,
             "-map", audio_map,
-            "-vsync", "cfr",
+            "-fps_mode", "cfr",
             "-dn",
             "-sn",
         ]
