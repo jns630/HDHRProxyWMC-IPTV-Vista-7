@@ -3,8 +3,8 @@ import ssl
 import socket
 import struct
 import logging
+import glob
 import os
-import json
 import shutil
 import sys
 import ctypes
@@ -19,6 +19,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import platform
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 from typing import Callable, Dict, List, Optional, Tuple
@@ -49,6 +50,7 @@ HDHR_TAG_ERROR_MESSAGE = 0x05
 HDHR_TAG_TUNER_COUNT = 0x10
 HDHR_TAG_LINEUP_URL = 0x27
 HDHR_TAG_BASE_URL = 0x2A
+HDHR_TAG_DEVICE_AUTH_STR = 0x2B
 
 
 class _ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
@@ -64,7 +66,6 @@ class _VistaHLSRelayHandler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
         logger.debug("Vista HLS relay: %s", fmt % args)
-HDHR_TAG_DEVICE_AUTH_STR = 0x2B
 
 HDHR_DEVICE_TYPE_WILDCARD = 0xFFFFFFFF
 HDHR_DEVICE_TYPE_TUNER = 0x00000001
@@ -332,7 +333,6 @@ class DiscoveryServer:
         logger.info("Discovery servers started (SSDP udp :1900, HDHR udp/tcp :65001)")
 
     def _make_ssdp_response(self, st: str) -> bytes:
-        import platform
         os_ver = platform.platform()
         return SSDP_RESPONSE_TEMPLATE.format(
             base_url=self.base_url,
@@ -2367,7 +2367,7 @@ class DiscoveryServer:
             pmt_pid = int(rf.get("pmt_pid") or 0x31)
             programs.append(program.to_bytes(2, "big") + (0xE000 | (pmt_pid & 0x1FFF)).to_bytes(2, "big"))
         body = tsid.to_bytes(2, "big") + bytes([0xC1, 0x00, 0x00]) + b"".join(programs)
-        return self._make_psi_section(0x00, body)
+        return self._make_psip_section(0x00, body)
 
     def _make_pmt_section(self, rf: Dict) -> bytes:
         program = int(rf.get("program") or ATSC_PROGRAM_NUMBER)
@@ -2386,7 +2386,7 @@ class DiscoveryServer:
             + (0xF000).to_bytes(2, "big")
             + streams
         )
-        return self._make_psi_section(0x02, body)
+        return self._make_psip_section(0x02, body)
 
     def _mpegts_video_stream_type(self) -> int:
         codec = (self.output_codec or "").lower()
@@ -2484,12 +2484,6 @@ class DiscoveryServer:
         return self._make_psip_section(0xC7, body)
 
     def _make_psip_section(self, table_id: int, body: bytes) -> bytes:
-        section_length = len(body) + 4
-        header = bytes([table_id]) + (0xB000 | section_length).to_bytes(2, "big")
-        section = header + body
-        return section + self._mpeg_crc32(section).to_bytes(4, "big")
-
-    def _make_psi_section(self, table_id: int, body: bytes) -> bytes:
         section_length = len(body) + 4
         header = bytes([table_id]) + (0xB000 | section_length).to_bytes(2, "big")
         section = header + body
@@ -2736,25 +2730,25 @@ class DiscoveryServer:
         if resolved:
             return resolved
 
-        executable_dir = os.path.dirname(os.path.abspath(sys.executable))
-        candidates = [
-            os.path.join(os.getcwd(), "ffmpeg.exe"),
-            os.path.join(os.getcwd(), "ffmpeg", "ffmpeg.exe"),
-            os.path.join(os.getcwd(), "ffmpeg", "bin", "ffmpeg.exe"),
-            os.path.join(executable_dir, "ffmpeg.exe"),
-            os.path.join(executable_dir, "ffmpeg", "ffmpeg.exe"),
-            os.path.join(executable_dir, "ffmpeg", "bin", "ffmpeg.exe"),
-            r"D:\WMC_EPG\New folder (4)\hdhr_proxy\ffmpeg\ffmpeg-2026-05-18-git-b4d11dffbf-essentials_build\bin\ffmpeg.exe",
-            r"C:\Users\jawwa\Downloads\Compressed\ffmpeg-2026-03-30-git-e54e117998-full_build\ffmpeg-2026-03-30-git-e54e117998-full_build\bin\ffmpeg.exe",
-            r"C:\Program Files\NextPVR\Other\ffmpeg.exe",
-            r"C:\Program Files (x86)\NPVR\Other\ffmpeg.exe",
-            r"C:\Program Files\Common Files\Solveig Multimedia\ffmpeg.exe",
-            r"C:\Users\jawwa\Downloads\New folder\ffmpeg.exe",
-        ]
-        for candidate in candidates:
-            if os.path.isfile(candidate):
-                logger.info("Using ffmpeg at %s", candidate)
-                return candidate
+        # Search common relative layouts next to the executable/cwd so the
+        # proxy stays portable without machine-specific absolute paths.
+        search_roots = [os.getcwd(), os.path.dirname(os.path.abspath(sys.executable))]
+        for search_root in search_roots:
+            candidates = [
+                os.path.join(search_root, "ffmpeg.exe"),
+                os.path.join(search_root, "ffmpeg", "ffmpeg.exe"),
+                os.path.join(search_root, "ffmpeg", "bin", "ffmpeg.exe"),
+                os.path.join(search_root, "bin", "ffmpeg.exe"),
+            ]
+            try:
+                pattern = os.path.join(search_root, "ffmpeg*", "**", "ffmpeg.exe")
+                candidates.extend(sorted(glob.glob(pattern, recursive=True))[:3])
+            except OSError:
+                pass
+            for candidate in candidates:
+                if os.path.isfile(candidate):
+                    logger.info("Using ffmpeg at %s", candidate)
+                    return candidate
 
         if ffmpeg_path:
             logger.warning("Configured ffmpeg path was not executable: %s", ffmpeg_path)

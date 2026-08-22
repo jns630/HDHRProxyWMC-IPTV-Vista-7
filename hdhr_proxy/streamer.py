@@ -294,15 +294,20 @@ def ffmpeg_transcode_stream(
             if not chunk:
                 break
             yield chunk
-            if proc.poll() is not None and not chunk:
-                break
     except GeneratorExit:
-        proc.kill()
-        proc.wait(timeout=5)
+        _terminate_ffmpeg(proc)
     finally:
-        if proc.poll() is None:
-            proc.kill()
-            proc.wait(timeout=5)
+        _terminate_ffmpeg(proc)
+
+
+def _terminate_ffmpeg(proc: subprocess.Popen):
+    if proc.poll() is not None:
+        return
+    proc.kill()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 def _log_stderr(proc: subprocess.Popen):

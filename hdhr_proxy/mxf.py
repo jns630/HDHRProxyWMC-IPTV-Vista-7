@@ -12,6 +12,7 @@ from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from .m3u_parser import M3UChannel
+from .reviews import extract_review_text, merge_review_into_description
 from .xmltv import resolve_channel_xmltv_ids
 
 logger = logging.getLogger(__name__)
@@ -494,6 +495,7 @@ def _collect_programmes(xmltv_xml: str, channel_meta: Dict[str, Dict]) -> Dict[s
         rating, rating_kind = _extract_rating(programme)
         airdate, year = _extract_airdate(programme)
         half_stars = _extract_half_stars(programme)
+        review_text = extract_review_text(programme)
         if is_movie and not half_stars:
             half_stars = "6"
         elif is_series and not half_stars:
@@ -521,6 +523,7 @@ def _collect_programmes(xmltv_xml: str, channel_meta: Dict[str, Dict]) -> Dict[s
             "airdate": airdate,
             "year": year,
             "half_stars": half_stars,
+            "review": review_text,
             "start_time": _to_mxf_time(start_dt),
             "duration": str(duration),
         }
@@ -855,8 +858,12 @@ def _program_mxf_attrs(program: Dict, vista_mode: bool) -> Dict[str, str]:
     }
     if program.get("episode_title"):
         attrs["episodeTitle"] = program["episode_title"]
-    if program.get("description"):
-        attrs["description"] = program["description"]
+    merged_description = merge_review_into_description(
+        program.get("description"),
+        program.get("review"),
+    )
+    if merged_description:
+        attrs["description"] = merged_description
     if program.get("short_description"):
         attrs["shortDescription"] = program["short_description"]
     if program.get("season_num") is not None:
@@ -1262,13 +1269,14 @@ def _parse_xmltv_datetime(value: Optional[str]) -> Optional[datetime]:
     parts = text.split()
     stamp = parts[0]
     offset = parts[1] if len(parts) > 1 else "+0000"
-    for fmt in ("%Y%m%d%H%M%S", "%Y%m%d%H%M", "%Y%m%d"):
+    # XMLTV stamps are YYYYMMDDHHMMSS with trailing fields optional.
+    for fmt, width in (("%Y%m%d%H%M%S", 14), ("%Y%m%d%H%M", 12), ("%Y%m%d", 8)):
         try:
-            dt = datetime.strptime(stamp[:len(datetime.now().strftime(fmt))], fmt)
-            tz = _parse_xmltv_offset(offset)
-            return dt.replace(tzinfo=tz).astimezone(timezone.utc)
+            dt = datetime.strptime(stamp[:width], fmt)
         except ValueError:
             continue
+        tz = _parse_xmltv_offset(offset)
+        return dt.replace(tzinfo=tz).astimezone(timezone.utc)
     return None
 
 
