@@ -330,6 +330,7 @@ class DiscoveryServer:
                 "source_url": None,
                 "temp_source_path": None,
                 "stream_announced": False,
+                "startup_thread": None,
                 "stream_restart_failures": 0,
                 "stream_restart_window_started_at": 0.0,
             }
@@ -754,7 +755,7 @@ class DiscoveryServer:
                 if value and value != "none" and not state.get("channel_id") and self._looks_like_atsc_scan_probe(state.get("channel", ""), [int(n) for n in re.findall(r"\d+", state.get("channel", ""))]):
                     state["channel_id"], state["rf"] = self._virtual_rf_for_current_tune(state.get("channel", ""))
                     self._refresh_tuner_status(tuner_idx)
-                self._set_tuner_target_locked(tuner_idx, value)
+                self._start_tuner_target_async(tuner_idx, value)
             elif field == "filter":
                 if not value or value == "bypass":
                     state["filter"] = "0x0000-0x1FFF"
@@ -776,6 +777,9 @@ class DiscoveryServer:
             return
 
         pid_channel_id, pid_rf = self._select_channel_for_filter_pids(state)
+        if not pid_channel_id and str(state.get("program") or "").strip() == "0" and state.get("rf"):
+            pid_channel_id = state["rf"].get("channel_id")
+            pid_rf = state["rf"]
         if state.get("process") and not pid_channel_id and not self._program_requests_specific_program(state.get("program")):
             return
         if pid_channel_id and pid_rf:
@@ -986,6 +990,11 @@ class DiscoveryServer:
                 f"ch={channel} lock=8vsb ss={rf['ss']} snq={rf['snq']} "
                 f"seq={rf['seq']} bps={rf['bps']} pps={rf['bps'] // 188}"
             )
+        elif state.get("target") not in (None, "", "none") and rf:
+            state["status"] = (
+                f"ch={channel} lock=8vsb ss=90 snq=90 seq=100 "
+                f"bps={rf['bps']} pps={rf['bps'] // 188} tuning=1"
+            )
             state["streaminfo"] = self._format_streaminfo_for_physical(rf)
         else:
             state["status"] = f"ch={channel} lock=none ss=0 snq=0 seq=0 bps=0 pps=0"
@@ -1129,6 +1138,23 @@ class DiscoveryServer:
             return self._safe_channel_name(explicit)[:7]
         return self._safe_channel_name(item.get("GuideName") or getattr(channel, "name", fallback))[:7]
 
+    def _start_tuner_target_async(self, tuner_idx: int, target: str):
+        state = self._tuner_state[tuner_idx]
+
+        def run_locked():
+            with self._state_lock:
+                if state.get("startup_thread") is not threading.current_thread():
+                    return
+                self._set_tuner_target_locked(tuner_idx, target)
+
+        worker = threading.Thread(
+            target=run_locked,
+            daemon=True,
+            name=f"hdhr-tune-{tuner_idx}",
+        )
+        state["startup_thread"] = worker
+        worker.start()
+
     def _set_tuner_target_locked(self, tuner_idx: int, target: str):
         state = self._tuner_state[tuner_idx]
         if not target or target == "none":
@@ -1175,6 +1201,9 @@ class DiscoveryServer:
         self._stop_tuner_process_locked(state)
 
         pid_channel_id, pid_rf = self._select_channel_for_filter_pids(state)
+        if not pid_channel_id and str(state.get("program") or "").strip() == "0" and state.get("rf"):
+            pid_channel_id = state["rf"].get("channel_id")
+            pid_rf = state["rf"]
         if self._should_hold_scan_psip_only(state) and not pid_channel_id:
             inferred_rf = self._representative_rf_for_filter(state) or state.get("rf")
             if inferred_rf:
@@ -1235,7 +1264,6 @@ class DiscoveryServer:
             return
         original_source_url = source_url
         source_url, temp_source_path = self._prepare_ffmpeg_input_source(source_url)
-
         missing_variants = getattr(channel, "ext", {}).get("hls_missing_variants") if channel else None
         if missing_variants:
             logger.warning(
@@ -1288,6 +1316,8 @@ class DiscoveryServer:
         state["target_norm"] = ffmpeg_target
         state["stream_rf_key"] = self._rf_stream_key(state.get("rf") or {})
         state["process"] = proc
+
+        state["startup_thread"] = None
         state["log_file"] = log_file
         state["stream_stop"] = stream_stop
         state["stream_thread"] = stream_thread
@@ -1813,6 +1843,8 @@ class DiscoveryServer:
         return not av_matches and len(pmt_matches) > 1
 
     def _should_defer_stream_for_program_selection(self, state: Dict) -> bool:
+        if str(state.get("program") or "").strip() == "0":
+            return False
         if self._program_requests_specific_program(state.get("program")):
             return False
         if self._select_channel_for_filter_pids(state)[0] and not self._should_hold_scan_psip_only(state):
@@ -1843,6 +1875,8 @@ class DiscoveryServer:
         return len(current_matches) != 1
 
     def _should_hold_scan_psip_only(self, state: Dict) -> bool:
+        if str(state.get("program") or "").strip() == "0":
+            return False
         if self._program_requests_specific_program(state.get("program")):
             return False
         if not self._is_scan_like_tune(state.get("channel")):
@@ -2326,7 +2360,6 @@ class DiscoveryServer:
             state["stream_announced"] = True
             state["stream_restart_failures"] = 0
             state["stream_restart_window_started_at"] = 0.0
-            self._stop_psip_sender_locked(state)
 
     def _normalize_stream_target(self, target: str) -> Optional[str]:
         value = (target or "").strip()
