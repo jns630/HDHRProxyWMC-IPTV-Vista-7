@@ -286,6 +286,7 @@ def build_lineup(
 ) -> Tuple[List[Dict], Dict[str, M3UChannel]]:
     lineup = []
     ch_map: Dict[str, M3UChannel] = {}
+    seen_guide_numbers = set()
     mapping = channel_mapping or {}
     fixed_programs_per_physical = _normalize_programs_per_physical(programs_per_physical)
     physical_count = _physical_channel_count(max_physical_channel)
@@ -337,6 +338,14 @@ def build_lineup(
             f"[tsid=0x{physical_channel:04x}]"
         )
         ch_map[guide_number] = ch
+        if guide_number in seen_guide_numbers:
+            logger.warning(
+                "Duplicate guide number %s (channel %s); keeping the later entry",
+                guide_number,
+                ch.name,
+            )
+        else:
+            seen_guide_numbers.add(guide_number)
         url = f"{base_url}/stream/{guide_number}"
         lineup.append({
             "GuideNumber": guide_number,

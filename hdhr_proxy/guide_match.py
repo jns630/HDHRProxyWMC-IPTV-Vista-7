@@ -12,13 +12,16 @@ logger = logging.getLogger(__name__)
 
 MXF_NS = "urn:com:dontocsata:xmltv:mxf"
 
+GUIDE_MATCH_CSV_PATH = "HDHRProxyWMC_GuideMatch.generated.csv"
+GUIDE_ONLY_INI_PATH = "HDHRProxyWMC_GuideOnly.generated.ini"
+
 
 def write_guide_match_utility(
     lineup: List[Dict],
     channel_map: Dict[str, M3UChannel],
     xmltv_xml: str,
-    csv_path: str = "HDHRProxyWMC_GuideMatch.generated.csv",
-    mapping_path: str = "HDHRProxyWMC_GuideOnly.generated.ini",
+    csv_path: str = GUIDE_MATCH_CSV_PATH,
+    mapping_path: str = GUIDE_ONLY_INI_PATH,
     mxf_path: Optional[str] = None,
 ) -> Tuple[str, str, int]:
     rows = build_guide_match_rows(lineup, channel_map, xmltv_xml, mxf_path=mxf_path)

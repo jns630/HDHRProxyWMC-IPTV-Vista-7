@@ -1,10 +1,12 @@
 import json
 import logging
+import socket
 import threading
 import xml.sax.saxutils
 import hashlib
 import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from socketserver import ThreadingMixIn
 from typing import Callable, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
 
@@ -12,6 +14,12 @@ from .streamer import StreamSession
 from .xmltv import XMLTVData
 
 logger = logging.getLogger(__name__)
+
+LOGO_CACHE_MAX_ENTRIES = 128
+
+
+class _ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True
 
 
 def get_base_url(config) -> str:
@@ -59,6 +67,7 @@ class HDHRRequestHandler(BaseHTTPRequestHandler):
     on_stream_start: Optional[Callable] = None
     on_stream_stop: Optional[Callable] = None
     active_streams: Dict[str, threading.Event] = {}
+    stream_admission_lock = threading.Lock()
     logo_urls: Dict[str, str] = {}
     logo_cache: Dict[str, tuple] = {}
 
@@ -104,6 +113,7 @@ class HDHRRequestHandler(BaseHTTPRequestHandler):
                 "LineupURL": f"{get_base_url(self.config)}/lineup.json",
                 "Channels": len(self.lineup),
                 "XMLTVURL": f"{get_base_url(self.config)}/xmltv.xml" if self.xmltv_data else None,
+                "GuideReviews": bool(getattr(self.config, "guide_reviews", True)),
             },
             indent=2,
         )
@@ -187,6 +197,8 @@ class HDHRRequestHandler(BaseHTTPRequestHandler):
                 logger.warning("Unable to fetch channel logo %s from %s: %s", logo_id, remote_url, exc)
                 self.send_error(502, "Unable to fetch logo")
                 return
+            if len(self.logo_cache) >= LOGO_CACHE_MAX_ENTRIES:
+                self.logo_cache.pop(next(iter(self.logo_cache)))
             self.logo_cache[logo_id] = (content_type, data)
 
         self.send_response(200)
@@ -194,7 +206,7 @@ class HDHRRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "public, max-age=86400")
         self.end_headers()
-        self.wfile.write(data)
+        self._write_body(data)
 
     def _handle_lineup_status(self):
         body = json.dumps(
@@ -224,7 +236,7 @@ class HDHRRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(encoded)))
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
-        self.wfile.write(encoded)
+        self._write_body(encoded)
 
     def _handle_stream(self, channel_id: str, query: Dict):
         del query
@@ -232,14 +244,14 @@ class HDHRRequestHandler(BaseHTTPRequestHandler):
             self.send_error(404, f"Channel {channel_id} not found")
             return
 
-        active_count = len(self.active_streams)
-        if active_count >= self.config.tuner_count:
-            logger.warning("Max tuners (%s) reached, rejecting %s", self.config.tuner_count, channel_id)
-            self.send_error(503, "All tuners in use")
-            return
-
         stop_event = threading.Event()
-        self.active_streams[channel_id] = stop_event
+        with self.stream_admission_lock:
+            active_count = len(self.active_streams)
+            if active_count >= self.config.tuner_count:
+                logger.warning("Max tuners (%s) reached, rejecting %s", self.config.tuner_count, channel_id)
+                self.send_error(503, "All tuners in use")
+                return
+            self.active_streams[channel_id] = stop_event
 
         if self.on_stream_start:
             self.on_stream_start(channel_id)
@@ -265,6 +277,8 @@ class HDHRRequestHandler(BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
             self.end_headers()
 
+            self.connection.settimeout(1.0)
+
             for chunk in session.stream():
                 if stop_event.is_set():
                     break
@@ -273,13 +287,11 @@ class HDHRRequestHandler(BaseHTTPRequestHandler):
                 chunk_len = hex(len(chunk))[2:].encode("ascii")
                 self.wfile.write(chunk_len + b"\r\n" + chunk + b"\r\n")
                 self.wfile.flush()
-
-            try:
+            if not stop_event.is_set():
                 self.wfile.write(b"0\r\n\r\n")
                 self.wfile.flush()
-            except OSError:
-                pass
-
+        except (socket.timeout, TimeoutError):
+            logger.info("Stream client stopped responding for channel %s", channel_id)
         except Exception as e:
             logger.error("Stream error for %s: %s", channel_id, e)
             try:
@@ -300,7 +312,7 @@ class HDHRRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
-        self.wfile.write(encoded)
+        self._write_body(encoded)
 
     def _send_xml(self, body: str):
         self._send_text(body, "application/xml; charset=utf-8")
@@ -313,13 +325,23 @@ class HDHRRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
-        self.wfile.write(encoded)
+        self._write_body(encoded)
+
+    def _write_body(self, data: bytes):
+        # HEAD requests must not carry a response body.
+        if getattr(self, "_suppress_body", False):
+            return
+        self.wfile.write(data)
 
     def log_message(self, fmt, *args):
         logger.debug("HTTP: %s", fmt % args)
 
     def do_HEAD(self):
-        self.do_GET()
+        self._suppress_body = True
+        try:
+            self.do_GET()
+        finally:
+            self._suppress_body = False
 
 
 class HDHRHTTPServer:
@@ -350,7 +372,7 @@ class HDHRHTTPServer:
         HDHRRequestHandler.logo_urls = _build_logo_url_map(self.channel_map)
         HDHRRequestHandler.logo_cache = {}
 
-        self._server = HTTPServer((self.host, self.port), HDHRRequestHandler)
+        self._server = _ThreadingHTTPServer((self.host, self.port), HDHRRequestHandler)
         self._thread = threading.Thread(
             target=self._server.serve_forever,
             daemon=True,

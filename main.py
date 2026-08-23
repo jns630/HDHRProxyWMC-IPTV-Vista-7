@@ -28,9 +28,12 @@ from hdhr_proxy.m3u_parser import M3UParser, build_lineup
 from hdhr_proxy.discovery import DiscoveryServer, normalize_device_id
 from hdhr_proxy.http_server import HDHRHTTPServer
 from hdhr_proxy.guide_match import (
+    GUIDE_MATCH_CSV_PATH,
+    GUIDE_ONLY_INI_PATH,
     build_guide_match_rows,
     filter_lineup_to_matched_channels,
-    write_guide_match_utility,
+    write_guide_match_csv,
+    write_guide_only_mapping_file,
     write_wmc_auto_match_mxf,
 )
 from hdhr_proxy.mxf import (
@@ -40,6 +43,7 @@ from hdhr_proxy.mxf import (
     run_wmc_post_import_tasks,
 )
 from hdhr_proxy.xmltv import load_xmltv
+from hdhr_proxy.reviews import enrich_xmltv_with_reviews
 from hdhr_proxy.vista_guide import (
     import_vista_guide_xml,
     write_vista_guide_xml,
@@ -153,14 +157,8 @@ def import_mxf_for_current_wmc(output_path: str, vista_mode: bool = False, vista
                 exc,
             )
             return False
-    try:
-        import_mxf(output_path)
-        return True
-    except (RuntimeError, PermissionError, subprocess.CalledProcessError) as exc:
-        if not vista_mode:
-            raise
-        logger.warning("Skipping Vista MXF import: %s", exc)
-        return False
+    import_mxf(output_path)
+    return True
 
 
 def configure_windows_hdhr_sources(cfg: Config):
@@ -305,15 +303,24 @@ def write_hdhrproxy_mapping_file(lineup, path: str = "HDHRProxyIPTV_MappingList.
 
 def find_local_ip() -> str:
     import socket
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.settimeout(0.5)
-        s.connect(("10.255.255.255", 1))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
+        sock.settimeout(0.5)
+        sock.connect(("10.255.255.255", 1))
+        return sock.getsockname()[0]
     except Exception:
         return "127.0.0.1"
+    finally:
+        sock.close()
+
+
+def _count_programme_reviews(xmltv_xml: str) -> int:
+    import xml.etree.ElementTree as ET
+    try:
+        root = ET.fromstring(xmltv_xml)
+    except ET.ParseError:
+        return 0
+    return len(root.findall("./programme/review"))
 
 
 def resolve_listen_ip(cfg: Config) -> str:
@@ -371,6 +378,17 @@ def run_proxy(cfg: Config):
         programs_per_physical=cfg.get("programs_per_physical"),
     )
     xmltv_data = load_xmltv(cfg.xmltv_file, cfg.xmltv_url, channel_map)
+    if xmltv_data and bool(cfg.get("guide_reviews", True)):
+        generate_reviews = bool(cfg.get("generate_guide_reviews", True))
+        xmltv_data.filtered_xml, generated_review_count = enrich_xmltv_with_reviews(
+            xmltv_data.filtered_xml,
+            generate_missing=generate_reviews,
+        )
+        logger.info(
+            "Guide reviews enabled: %s programmes carry reviews (%s generated).",
+            _count_programme_reviews(xmltv_data.filtered_xml),
+            generated_review_count,
+        )
     generated_mxf_path = None
     auto_match_mxf_path = None
     vista_guide_xml_path = None
@@ -448,12 +466,9 @@ def run_proxy(cfg: Config):
             xmltv_data.filtered_xml,
             mxf_path=generated_mxf_path,
         )
-        guide_match_csv, guide_only_mapping, match_count = write_guide_match_utility(
-            lineup,
-            channel_map,
-            xmltv_data.filtered_xml,
-            mxf_path=generated_mxf_path,
-        )
+        guide_match_csv = write_guide_match_csv(guide_rows, GUIDE_MATCH_CSV_PATH)
+        guide_only_mapping = write_guide_only_mapping_file(lineup, guide_rows, GUIDE_ONLY_INI_PATH)
+        match_count = len(guide_rows)
         logger.info("Wrote WMC guide match utility (%s matched channels): %s", match_count, guide_match_csv)
         logger.info("Wrote WMC guide-only mapping list: %s", guide_only_mapping)
         if cfg.guide_only_lineup:
@@ -568,6 +583,8 @@ Examples:
     parser.add_argument("--import-auto-match-mxf", action="store_true", help="Generate and import a WMC auto-match MXF mapped to the current lineup")
     parser.add_argument("--map-guide-wmc", action="store_true", help="Generate and import a lineup-matched guide directly into the WMC internal database")
     parser.add_argument("--guide-only-lineup", action="store_true", help="Only advertise channels that matched XMLTV/MXF guide data")
+    parser.add_argument("--no-guide-reviews", action="store_true", help="Disable guide reviews in XMLTV output and WMC descriptions")
+    parser.add_argument("--no-generated-reviews", action="store_true", help="Keep source reviews but stop generating reviews for programmes that lack them")
     parser.add_argument(
         "--hls-base-url",
         help="Original web URL for a saved HLS master playlist that uses relative variant/segment URLs",
@@ -604,6 +621,7 @@ Examples:
 
     # Build config
     cfg = Config(args.config)
+    cfg.config_file = args.config
 
     # Override with CLI args
     if args.m3u_file:
@@ -637,6 +655,11 @@ Examples:
         cfg.import_auto_match_mxf = True
     if args.guide_only_lineup:
         cfg.guide_only_lineup = True
+    if args.no_guide_reviews:
+        cfg.guide_reviews = False
+        cfg.generate_guide_reviews = False
+    if args.no_generated_reviews:
+        cfg.generate_guide_reviews = False
     if args.port:
         cfg.http_port = args.port
     if args.listen_ip:
@@ -677,63 +700,69 @@ Examples:
     run_proxy(cfg)
 
 
+SERVICE_NAME = "VirtualHDHRProxy"
+SERVICE_DISPLAY_NAME = "Virtual HDHomerun Proxy"
+
+
+def _service_bin_path(cfg: Config) -> str:
+    parts = ['"{}"'.format(sys.executable), '"{}"'.format(os.path.abspath(__file__))]
+    if getattr(cfg, "m3u_file", None):
+        parts.append('--m3u-file "{}"'.format(cfg.m3u_file))
+    elif getattr(cfg, "m3u_url", None):
+        parts.append('--m3u-url "{}"'.format(cfg.m3u_url))
+    if getattr(cfg, "config_file", None):
+        parts.append('--config "{}"'.format(cfg.config_file))
+    return " ".join(parts)
+
+
+def _run_sc(*sc_args: str) -> int:
+    completed = subprocess.run(
+        ["sc.exe"] + list(sc_args),
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        universal_newlines=True,
+    )
+    if completed.returncode != 0:
+        logger.warning("sc.exe %s failed: %s", " ".join(sc_args), (completed.stdout or "").strip())
+    return completed.returncode
+
+
 def _handle_service_command(cmd: str, cfg: Config):
-    try:
-        import win32serviceutil
-        import win32service
-        import servicemanager
-    except ImportError:
-        logger.error(
-            "pywin32 is required for Windows service support. "
-            "Install it: pip install pywin32"
-        )
+    if platform.system() != "Windows":
+        logger.error("Windows service commands are only available on Windows.")
         sys.exit(1)
 
-    service_name = "VirtualHDHRProxy"
-    service_display_name = "Virtual HDHomerun Proxy"
-
     if cmd == "install":
-        logger.info(f"Installing Windows service '{service_name}'...")
-        # Build the python command with current config
-        python_exe = sys.executable
-        script_path = os.path.abspath(__file__)
-        if cfg.m3u_file:
-            cfg_arg = f'--m3u-file "{cfg.m3u_file}"'
-        elif cfg.m3u_url:
-            cfg_arg = f'--m3u-url "{cfg.m3u_url}"'
-        else:
-            cfg_arg = f'--config "{cfg.as_dict}"'
-            logger.warning("No M3U source configured; service may not start correctly.")
-
-        cmd_line = f'{python_exe} "{script_path}"'
-
-        # Use win32serviceutil to install
-        import subprocess
-        subprocess.run(
-            [
-                python_exe, "-m", "win32serviceutil", "InstallService",
-                python_exe, script_path,
-                service_name, service_display_name,
-            ],
-            check=False,
+        logger.info("Installing Windows service '%s'...", SERVICE_NAME)
+        _run_sc(
+            "create", SERVICE_NAME,
+            "binPath=", _service_bin_path(cfg),
+            "start=", "auto",
+            "DisplayName=", SERVICE_DISPLAY_NAME,
         )
-        logger.info(f"Service '{service_name}' installed.")
-
+        _run_sc(
+            "description", SERVICE_NAME,
+            "Virtual HDHomeRun proxy for IPTV and Windows Media Center.",
+        )
+        # A console process does not perform the SCM handshake, so the
+        # service control manager reports it as unresponsive even while the
+        # proxy itself is running. Point users at a proper wrapper if needed.
+        logger.warning(
+            "The virtual tuner runs as a console process; SCM may report error "
+            "1053 on start while the proxy still works. Use a wrapper such as "
+            "NSSM if you need full service lifecycle support."
+        )
     elif cmd == "remove":
-        logger.info(f"Removing Windows service '{service_name}'...")
-        import subprocess
-        subprocess.run(
-            [sys.executable, "-m", "win32serviceutil", "RemoveService", service_name],
-            check=False,
-        )
-
+        logger.info("Removing Windows service '%s'...", SERVICE_NAME)
+        _run_sc("stop", SERVICE_NAME)
+        _run_sc("delete", SERVICE_NAME)
     elif cmd == "start":
-        logger.info(f"Starting Windows service '{service_name}'...")
-        win32serviceutil.StartService(service_name)
-
+        logger.info("Starting Windows service '%s'...", SERVICE_NAME)
+        _run_sc("start", SERVICE_NAME)
     elif cmd == "stop":
-        logger.info(f"Stopping Windows service '{service_name}'...")
-        win32serviceutil.StopService(service_name)
+        logger.info("Stopping Windows service '%s'...", SERVICE_NAME)
+        _run_sc("stop", SERVICE_NAME)
 
 
 if __name__ == "__main__":

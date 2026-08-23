@@ -3,8 +3,8 @@ import ssl
 import socket
 import struct
 import logging
+import glob
 import os
-import json
 import shutil
 import sys
 import ctypes
@@ -19,6 +19,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import platform
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 from typing import Callable, Dict, List, Optional, Tuple
@@ -49,6 +50,7 @@ HDHR_TAG_ERROR_MESSAGE = 0x05
 HDHR_TAG_TUNER_COUNT = 0x10
 HDHR_TAG_LINEUP_URL = 0x27
 HDHR_TAG_BASE_URL = 0x2A
+HDHR_TAG_DEVICE_AUTH_STR = 0x2B
 
 
 class _ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
@@ -64,7 +66,17 @@ class _VistaHLSRelayHandler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
         logger.debug("Vista HLS relay: %s", fmt % args)
-HDHR_TAG_DEVICE_AUTH_STR = 0x2B
+
+class _ChannelHLSRelayHandler(BaseHTTPRequestHandler):
+    server_version = "PlutoChannelRelay/1.0"
+    sys_version = ""
+
+    def do_GET(self):
+        self.server.relay_owner._handle_channel_relay_request(self)
+
+    def log_message(self, fmt, *args):
+        logger.debug("Pluto channel relay: %s", fmt % args)
+
 
 HDHR_DEVICE_TYPE_WILDCARD = 0xFFFFFFFF
 HDHR_DEVICE_TYPE_TUNER = 0x00000001
@@ -286,6 +298,9 @@ class DiscoveryServer:
         self._lineup_scan_started_at = 0.0
         self._hls_variant_cache: Dict[str, Tuple[str, float]] = {}
         self._prepared_input_cache: Dict[str, Tuple[str, float]] = {}
+        self._channel_relay_server = None
+        self._channel_relay_urls: Dict[str, Tuple[str, float]] = {}
+        self._channel_relay_lock = threading.Lock()
         self._vista_hls_relay_server = None
         self._vista_hls_relay_urls: Dict[str, str] = {}
         self._vista_hls_relay_lock = threading.Lock()
@@ -332,7 +347,6 @@ class DiscoveryServer:
         logger.info("Discovery servers started (SSDP udp :1900, HDHR udp/tcp :65001)")
 
     def _make_ssdp_response(self, st: str) -> bytes:
-        import platform
         os_ver = platform.platform()
         return SSDP_RESPONSE_TEMPLATE.format(
             base_url=self.base_url,
@@ -1283,7 +1297,89 @@ class DiscoveryServer:
         self._start_psip_sender_locked(state, stream_target)
         logger.info("Streaming channel %s to HDHR target %s (ffmpeg log: %s)", channel_id, target, log_path)
 
+    def _stable_channel_source_url(self, source_url: str) -> Optional[str]:
+        if not self.force_vista_mode:
+            return None
+        parsed = urllib.parse.urlparse(source_url or "")
+        if parsed.scheme.lower() not in ("http", "https"):
+            return None
+        if not self._needs_pluto_headers(source_url):
+            return None
+
+        with self._channel_relay_lock:
+            for token, cached in list(self._channel_relay_urls.items()):
+                upstream_url, expires_at = cached
+                if expires_at <= time.monotonic():
+                    self._channel_relay_urls.pop(token, None)
+                    continue
+                if upstream_url == source_url:
+                    return f"http://127.0.0.1:{self._channel_relay_server.server_port}/hls/{token}"
+
+            if not self._channel_relay_server:
+                server = _ThreadingHTTPServer(("127.0.0.1", 0), _ChannelHLSRelayHandler)
+                server.relay_owner = self
+                self._channel_relay_server = server
+                threading.Thread(
+                    target=server.serve_forever,
+                    daemon=True,
+                    name="pluto-channel-relay",
+                ).start()
+                logger.info("Pluto stable channel relay started on http://127.0.0.1:%s", server.server_port)
+
+            token = uuid.uuid4().hex + ".m3u8"
+            self._channel_relay_urls[token] = (source_url, time.monotonic() + 86400)
+            url = f"http://127.0.0.1:{self._channel_relay_server.server_port}/hls/{token}"
+            logger.info("Created stable Pluto channel input: %s", url)
+            return url
+
+    def _handle_channel_relay_request(self, handler: BaseHTTPRequestHandler):
+        token = urllib.parse.urlparse(handler.path).path.rsplit("/", 1)[-1]
+        with self._channel_relay_lock:
+            cached = self._channel_relay_urls.get(token)
+        if not cached:
+            handler.send_error(404, "Unknown channel")
+            return
+
+        source_url, _ = cached
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122 Safari/537.36",
+            "Accept": "application/vnd.apple.mpegurl,application/x-mpegURL,*/*",
+            "Origin": "https://pluto.tv",
+            "Referer": "https://pluto.tv/",
+        }
+        try:
+            request = urllib.request.Request(source_url, headers=headers)
+            with urllib.request.urlopen(request, timeout=8) as response:
+                body = response.read(512 * 1024)
+                content_type = response.headers.get("Content-Type") or "application/vnd.apple.mpegurl"
+                final_url = response.geturl() or source_url
+        except Exception as exc:
+            logger.warning("Stable Pluto relay failed for %s: %s", source_url, exc)
+            handler.send_error(502, "Unable to refresh channel playlist")
+            return
+
+        text = body.decode("utf-8", errors="replace")
+        base_url = final_url.rsplit("/", 1)[0] + "/"
+        rewritten = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                line = urllib.parse.urljoin(base_url, stripped)
+            elif stripped.startswith("#EXT-X-STREAM-INF") and "BANDWIDTH" not in stripped.upper():
+                line += ",BANDWIDTH=3000000"
+            rewritten.append(line)
+        body = ("\n".join(rewritten) + "\n").encode("utf-8")
+        handler.send_response(200)
+        handler.send_header("Content-Type", content_type)
+        handler.send_header("Content-Length", str(len(body)))
+        handler.send_header("Cache-Control", "no-store")
+        handler.end_headers()
+        handler.wfile.write(body)
+
     def _prepare_ffmpeg_input_source(self, source_url: str) -> Tuple[str, Optional[str]]:
+        stable_source = self._stable_channel_source_url(source_url)
+        if stable_source:
+            return stable_source, None
         local_master = self._build_local_pluto_master(source_url)
         if local_master:
             return local_master, local_master
@@ -1889,17 +1985,13 @@ class DiscoveryServer:
                 except OSError:
                     pass
             return
-        proc.terminate()
+        proc.kill()
         try:
-            proc.wait(timeout=2)
+            proc.wait(timeout=0.5)
         except subprocess.TimeoutExpired:
-            proc.kill()
-            try:
-                proc.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                pass
+            pass
         if stream_thread:
-            stream_thread.join(timeout=1.5)
+            stream_thread.join(timeout=0.25)
         if log_file:
             log_file.close()
         if temp_source_path and os.path.exists(temp_source_path) and not self._is_cached_prepared_input(temp_source_path):
@@ -2367,7 +2459,7 @@ class DiscoveryServer:
             pmt_pid = int(rf.get("pmt_pid") or 0x31)
             programs.append(program.to_bytes(2, "big") + (0xE000 | (pmt_pid & 0x1FFF)).to_bytes(2, "big"))
         body = tsid.to_bytes(2, "big") + bytes([0xC1, 0x00, 0x00]) + b"".join(programs)
-        return self._make_psi_section(0x00, body)
+        return self._make_psip_section(0x00, body)
 
     def _make_pmt_section(self, rf: Dict) -> bytes:
         program = int(rf.get("program") or ATSC_PROGRAM_NUMBER)
@@ -2386,7 +2478,7 @@ class DiscoveryServer:
             + (0xF000).to_bytes(2, "big")
             + streams
         )
-        return self._make_psi_section(0x02, body)
+        return self._make_psip_section(0x02, body)
 
     def _mpegts_video_stream_type(self) -> int:
         codec = (self.output_codec or "").lower()
@@ -2489,12 +2581,6 @@ class DiscoveryServer:
         section = header + body
         return section + self._mpeg_crc32(section).to_bytes(4, "big")
 
-    def _make_psi_section(self, table_id: int, body: bytes) -> bytes:
-        section_length = len(body) + 4
-        header = bytes([table_id]) + (0xB000 | section_length).to_bytes(2, "big")
-        section = header + body
-        return section + self._mpeg_crc32(section).to_bytes(4, "big")
-
     def _packetize_psi_section(self, pid: int, section: bytes, continuity: int) -> Tuple[List[bytes], int]:
         packets = []
         data = b"\x00" + section
@@ -2553,13 +2639,17 @@ class DiscoveryServer:
             parsed = urllib.parse.urlparse(source_url or "")
             if parsed.path.lower().endswith((".m3u8", ".m3u")):
                 input_args.extend([
+                    "-reconnect_on_network_error", "1",
+                    "-reconnect_on_http_error", "429,500,502,503,504",
+                ])
+                input_args.extend([
                     "-thread_queue_size", "1024",
                     "-protocol_whitelist", "file,http,https,tcp,tls,crypto,udp,rtp",
                     "-allowed_extensions", "ALL",
                 ])
             if self._needs_pluto_headers(source_url):
                 input_args.extend([
-                    "-headers", "Accept: application/vnd.apple.mpegurl,application/x-mpegURL,*/*\r\nOrigin: https://pluto.tv\r\nReferer: https://pluto.tv/\r\n",
+                    "-headers", "Accept: application/vnd.apple.mpegurl,application/x-mpegURL,*/*\r\nOrigin: https://pluto.tv\r\nReferer: https://pluto.tv/\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122 Safari/537.36\r\n",
                 ])
         elif self._looks_like_local_hls(source_url):
             input_args.extend([
@@ -2736,25 +2826,25 @@ class DiscoveryServer:
         if resolved:
             return resolved
 
-        executable_dir = os.path.dirname(os.path.abspath(sys.executable))
-        candidates = [
-            os.path.join(os.getcwd(), "ffmpeg.exe"),
-            os.path.join(os.getcwd(), "ffmpeg", "ffmpeg.exe"),
-            os.path.join(os.getcwd(), "ffmpeg", "bin", "ffmpeg.exe"),
-            os.path.join(executable_dir, "ffmpeg.exe"),
-            os.path.join(executable_dir, "ffmpeg", "ffmpeg.exe"),
-            os.path.join(executable_dir, "ffmpeg", "bin", "ffmpeg.exe"),
-            r"D:\WMC_EPG\New folder (4)\hdhr_proxy\ffmpeg\ffmpeg-2026-05-18-git-b4d11dffbf-essentials_build\bin\ffmpeg.exe",
-            r"C:\Users\jawwa\Downloads\Compressed\ffmpeg-2026-03-30-git-e54e117998-full_build\ffmpeg-2026-03-30-git-e54e117998-full_build\bin\ffmpeg.exe",
-            r"C:\Program Files\NextPVR\Other\ffmpeg.exe",
-            r"C:\Program Files (x86)\NPVR\Other\ffmpeg.exe",
-            r"C:\Program Files\Common Files\Solveig Multimedia\ffmpeg.exe",
-            r"C:\Users\jawwa\Downloads\New folder\ffmpeg.exe",
-        ]
-        for candidate in candidates:
-            if os.path.isfile(candidate):
-                logger.info("Using ffmpeg at %s", candidate)
-                return candidate
+        # Search common relative layouts next to the executable/cwd so the
+        # proxy stays portable without machine-specific absolute paths.
+        search_roots = [os.getcwd(), os.path.dirname(os.path.abspath(sys.executable))]
+        for search_root in search_roots:
+            candidates = [
+                os.path.join(search_root, "ffmpeg.exe"),
+                os.path.join(search_root, "ffmpeg", "ffmpeg.exe"),
+                os.path.join(search_root, "ffmpeg", "bin", "ffmpeg.exe"),
+                os.path.join(search_root, "bin", "ffmpeg.exe"),
+            ]
+            try:
+                pattern = os.path.join(search_root, "ffmpeg*", "**", "ffmpeg.exe")
+                candidates.extend(sorted(glob.glob(pattern, recursive=True))[:3])
+            except OSError:
+                pass
+            for candidate in candidates:
+                if os.path.isfile(candidate):
+                    logger.info("Using ffmpeg at %s", candidate)
+                    return candidate
 
         if ffmpeg_path:
             logger.warning("Configured ffmpeg path was not executable: %s", ffmpeg_path)
