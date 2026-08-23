@@ -1264,9 +1264,6 @@ class DiscoveryServer:
             return
         original_source_url = source_url
         source_url, temp_source_path = self._prepare_ffmpeg_input_source(source_url)
-        if str(state.get("target") or "").lower() == "none" or state.get("startup_thread") is not threading.current_thread():
-            return
-
         missing_variants = getattr(channel, "ext", {}).get("hls_missing_variants") if channel else None
         if missing_variants:
             logger.warning(
@@ -1295,9 +1292,6 @@ class DiscoveryServer:
             )
         except OSError as e:
             logger.warning("Unable to start ffmpeg for HDHR target %s: %s", target, e)
-            return
-
-        if str(state.get("target") or "").lower() == "none" or state.get("startup_thread") is not threading.current_thread():
             return
 
         stream_stop = threading.Event()
@@ -1991,8 +1985,6 @@ class DiscoveryServer:
         }
 
     def _stop_tuner_process_locked(self, state: Dict):
-        startup_thread = state.get("startup_thread")
-        state["startup_thread"] = None
         psip_stop = state.get("psip_stop")
         state["psip_stop"] = None
         state["psip_thread"] = None
