@@ -1846,6 +1846,8 @@ class DiscoveryServer:
         return not av_matches and len(pmt_matches) > 1
 
     def _should_defer_stream_for_program_selection(self, state: Dict) -> bool:
+        if str(state.get("program") or "").strip() == "0":
+            return False
         if self._program_requests_specific_program(state.get("program")):
             return False
         if self._select_channel_for_filter_pids(state)[0] and not self._should_hold_scan_psip_only(state):
