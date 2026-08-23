@@ -1,5 +1,6 @@
 import json
 import logging
+import socket
 import threading
 import xml.sax.saxutils
 import hashlib
@@ -276,6 +277,8 @@ class HDHRRequestHandler(BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
             self.end_headers()
 
+            self.connection.settimeout(1.0)
+
             for chunk in session.stream():
                 if stop_event.is_set():
                     break
@@ -284,13 +287,11 @@ class HDHRRequestHandler(BaseHTTPRequestHandler):
                 chunk_len = hex(len(chunk))[2:].encode("ascii")
                 self.wfile.write(chunk_len + b"\r\n" + chunk + b"\r\n")
                 self.wfile.flush()
-
-            try:
+            if not stop_event.is_set():
                 self.wfile.write(b"0\r\n\r\n")
                 self.wfile.flush()
-            except OSError:
-                pass
-
+        except (socket.timeout, TimeoutError):
+            logger.info("Stream client stopped responding for channel %s", channel_id)
         except Exception as e:
             logger.error("Stream error for %s: %s", channel_id, e)
             try:

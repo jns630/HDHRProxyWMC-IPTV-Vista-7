@@ -177,6 +177,27 @@ class HttpServerTests(unittest.TestCase):
         body = json.loads(urllib.request.urlopen(self._url("/"), timeout=5).read())
         self.assertIs(body.get("GuideReviews"), True)
 
+    @unittest.skipUnless(os.name == "nt", "socket handle cleanup is Windows-specific")
+    def test_stream_stops_promptly_when_terminated(self):
+        import hdhr_proxy.http_server as http_module
+
+        class StubStreamSession(object):
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def stream(self):
+                for _ in range(1000):
+                    yield b"\x47" * 188
+
+        original = http_module.StreamSession
+        http_module.StreamSession = StubStreamSession
+        try:
+            response = urllib.request.urlopen(self._url("/stream/3.1"), timeout=5)
+            self.assertEqual(response.status, 200)
+            response.fp.raw._sock.close()
+        finally:
+            http_module.StreamSession = original
+
     def test_lineup_json_while_stream_active(self):
         # A slow fake stream must not block other endpoints (threading server).
         ready = threading.Event()
