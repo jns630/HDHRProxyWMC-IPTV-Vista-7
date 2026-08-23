@@ -777,6 +777,9 @@ class DiscoveryServer:
             return
 
         pid_channel_id, pid_rf = self._select_channel_for_filter_pids(state)
+        if not pid_channel_id and str(state.get("program") or "").strip() == "0" and state.get("rf"):
+            pid_channel_id = state["rf"].get("channel_id")
+            pid_rf = state["rf"]
         if state.get("process") and not pid_channel_id and not self._program_requests_specific_program(state.get("program")):
             return
         if pid_channel_id and pid_rf:
@@ -1873,6 +1876,8 @@ class DiscoveryServer:
         return len(current_matches) != 1
 
     def _should_hold_scan_psip_only(self, state: Dict) -> bool:
+        if str(state.get("program") or "").strip() == "0":
+            return False
         if self._program_requests_specific_program(state.get("program")):
             return False
         if not self._is_scan_like_tune(state.get("channel")):
