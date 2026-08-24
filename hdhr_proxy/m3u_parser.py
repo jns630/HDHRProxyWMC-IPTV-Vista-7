@@ -266,12 +266,7 @@ class M3UParser:
             if match:
                 width, height = int(match.group(1)), int(match.group(2))
             bandwidth = int(re.sub(r"\D", "", attrs.get("average-bandwidth") or attrs.get("bandwidth") or "0") or "0")
-            # Prefer a ready-to-transcode 720p-ish variant; WMC is happier when ffmpeg avoids probing every rung.
-            if 600 <= height <= 900:
-                return (3, bandwidth)
-            if 900 < height <= 1080:
-                return (2, -bandwidth)
-            return (1, bandwidth)
+            return (height, width, bandwidth)
 
         return max(variants, key=score)[0]
 

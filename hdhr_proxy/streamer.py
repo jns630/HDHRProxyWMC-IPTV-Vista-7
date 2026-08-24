@@ -18,6 +18,8 @@ FFMPEG_ANALYZE_US = "5000000"
 FFMPEG_PROBE_BYTES = "5000000"
 VISTA_FRAME_SIZE = "640x360"
 VISTA_VIDEO_BITRATE_BPS = 2500000
+FFMPEG_COPY_ANALYZE_US = "1500000"
+FFMPEG_COPY_PROBE_BYTES = "2000000"
 FFMPEG_INPUT_OPTIONS = [
     "-fflags", "+genpts+discardcorrupt",
     "-flags", "low_delay",
@@ -207,6 +209,15 @@ def direct_stream(source_url: str):
             yield chunk
 
 
+def _is_transport_stream_source(source_url: str) -> bool:
+    path = urllib.parse.urlparse(source_url or "").path.lower()
+    return path.endswith((".ts", ".mts", ".m2ts"))
+
+
+def _is_network_media_source(source_url: str) -> bool:
+    return urllib.parse.urlparse(source_url or "").scheme.lower() in ("http", "https")
+
+
 def ffmpeg_transcode_stream(
     source_url: str,
     ffmpeg_path: str,
@@ -217,7 +228,13 @@ def ffmpeg_transcode_stream(
     vista_mode: bool = False,
 ):
     source_url = _resolve_hls_source_url(source_url)
+
+    if _is_transport_stream_source(source_url) and _is_network_media_source(source_url):
+        yield from direct_stream(source_url)
+        return
+
     use_hls_profile = _is_hls_like_source(source_url)
+    video_copy = True
     effective_bitrate = _vista_profile_bitrate(bitrate) if vista_mode else (
         _hls_profile_bitrate(bitrate) if use_hls_profile else bitrate
     )
@@ -228,8 +245,8 @@ def ffmpeg_transcode_stream(
         "-nostdin",
         "-fflags", "+genpts+discardcorrupt",
         "-flags", "low_delay",
-        "-analyzeduration", FFMPEG_ANALYZE_US,
-        "-probesize", FFMPEG_PROBE_BYTES,
+        "-analyzeduration", FFMPEG_COPY_ANALYZE_US,
+        "-probesize", FFMPEG_COPY_PROBE_BYTES,
         "-protocol_whitelist", "file,http,https,tcp,tls,crypto,udp,rtp",
         "-reconnect_at_eof", "1",
         "-reconnect_streamed", "1",
@@ -246,11 +263,17 @@ def ffmpeg_transcode_stream(
         "-i", source_url,
         "-map", "0:v:0?",
         "-map", "0:a:0?",
-        "-fps_mode", "cfr",
+        "-fps_mode", "passthrough",
         "-dn",
         "-sn",
     ])
-    cmd += video_encoder_args(output_codec, effective_bitrate, use_hls_profile=use_hls_profile, vista_mode=vista_mode) + [
+    video_args = ["-c:v", "copy"] if video_copy else video_encoder_args(
+        output_codec,
+        effective_bitrate,
+        use_hls_profile=use_hls_profile,
+        vista_mode=vista_mode,
+    )
+    cmd += video_args + [
         "-c:a", audio_codec,
         "-b:a", "192k",
         "-ar", "48000",

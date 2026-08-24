@@ -105,6 +105,8 @@ USN: uuid:{device_id}::urn:schemas-silicondust-com:device:hdhomerun:1\r
 
 FFMPEG_ANALYZE_US = "5000000"
 FFMPEG_PROBE_BYTES = "5000000"
+FFMPEG_COPY_ANALYZE_US = "1500000"
+FFMPEG_COPY_PROBE_BYTES = "2000000"
 
 DEVICE_ID_CHECKSUM_TABLE = (0xA, 0x5, 0xF, 0x6, 0x7, 0xC, 0x1, 0xB, 0x9, 0x2, 0x8, 0xD, 0x4, 0x3, 0xE, 0x0)
 
@@ -2648,7 +2650,6 @@ class DiscoveryServer:
         ts_id = int(rf.get("physical", 1)) if rf else 1
         service_name = rf.get("name", "VirtualHD") if rf else "VirtualHD"
         transport_bps = self._transport_bps()
-        effective_bitrate = self._effective_bitrate(source_url)
         pmt_pid = int(rf.get("pmt_pid") or 0x31) if rf else 0x31
         video_pid = int(rf.get("video_pid") or 0x41) if rf else 0x41
         audio_pid = int(rf.get("audio_pid") or 0x51) if rf else 0x51
@@ -2658,8 +2659,8 @@ class DiscoveryServer:
             "-loglevel", "info",
             "-nostdin",
             "-fflags", "+genpts+discardcorrupt",
-            "-analyzeduration", FFMPEG_ANALYZE_US,
-            "-probesize", FFMPEG_PROBE_BYTES,
+            "-analyzeduration", FFMPEG_COPY_ANALYZE_US,
+            "-probesize", FFMPEG_COPY_PROBE_BYTES,
         ]
         if self._is_network_media_source(source_url):
             input_args.extend([
@@ -2697,11 +2698,11 @@ class DiscoveryServer:
         output_args = [
             "-map", video_map,
             "-map", audio_map,
-            "-fps_mode", "cfr",
+            "-fps_mode", "passthrough",
             "-dn",
             "-sn",
         ]
-        return input_args + output_args + self._video_encoder_args(effective_bitrate, self._uses_hls_quality_profile(source_url)) + [
+        return input_args + output_args + ["-c:v", "copy"] + [
             "-c:a", "ac3",
             "-b:a", "192k",
             "-ar", "48000",
