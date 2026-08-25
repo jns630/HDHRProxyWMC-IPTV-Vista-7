@@ -2698,11 +2698,11 @@ class DiscoveryServer:
         output_args = [
             "-map", video_map,
             "-map", audio_map,
-            "-fps_mode", "passthrough",
+            "-fps_mode", "cfr",
             "-dn",
             "-sn",
         ]
-        return input_args + output_args + ["-c:v", "copy"] + [
+        return input_args + output_args + self._video_encoder_args(effective_bitrate, self._uses_hls_quality_profile(source_url)) + [
             "-c:a", "ac3",
             "-b:a", "192k",
             "-ar", "48000",
@@ -2729,7 +2729,7 @@ class DiscoveryServer:
     def _video_encoder_args(self, effective_bitrate: str, use_hls_profile: bool = False) -> List[str]:
         codec = (self.output_codec or "mpeg2video").lower()
         vista_mode = bool(getattr(self, "force_vista_mode", False))
-        frame_size = "640x360" if vista_mode else "1280x720"
+        frame_size = "1920x1080" if not vista_mode else "1280x720"
         video_bufsize = f"{max(self._bitrate_to_bps(effective_bitrate) // 500, 1000)}k"
         common = [
             "-pix_fmt", "yuv420p",
@@ -2749,7 +2749,7 @@ class DiscoveryServer:
                 "-tune", "zerolatency",
                 "-x264-params", "nal-hrd=cbr:force-cfr=1",
                 "-profile:v", "high",
-                "-level:v", "4.0",
+                "-level:v", "5.1",
             ] + common
         args = [
             "-c:v", "mpeg2video",
