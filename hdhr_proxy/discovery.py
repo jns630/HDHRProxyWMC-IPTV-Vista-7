@@ -2650,6 +2650,7 @@ class DiscoveryServer:
         ts_id = int(rf.get("physical", 1)) if rf else 1
         service_name = rf.get("name", "VirtualHD") if rf else "VirtualHD"
         transport_bps = self._transport_bps()
+        effective_bitrate = self._effective_bitrate(source_url)
         pmt_pid = int(rf.get("pmt_pid") or 0x31) if rf else 0x31
         video_pid = int(rf.get("video_pid") or 0x41) if rf else 0x41
         audio_pid = int(rf.get("audio_pid") or 0x51) if rf else 0x51
