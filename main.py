@@ -502,6 +502,15 @@ def run_proxy(cfg: Config):
     )
     discovery.start()
 
+    if not discovery.wait_for_critical_listeners(timeout=2.0):
+        logger.critical(
+            "HDHR discovery/control listener failed to bind. "
+            "Run repair_hdhr_port.ps1 as Administrator, then restart the proxy."
+        )
+        stop_event.set()
+        http_server.stop()
+        return
+
     logger.info("Proxy running. Press Ctrl+C to stop.")
 
     # Wait for shutdown

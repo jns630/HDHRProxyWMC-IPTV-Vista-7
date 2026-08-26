@@ -311,6 +311,8 @@ class DiscoveryServer:
         self._vista_hls_ssl_context = ssl._create_unverified_context() if force_vista_mode else None
         self._state_lock = threading.Lock()
         self._rf_channels = self._build_rf_channel_map()
+        self._udp_discovery_bound = threading.Event()
+        self._tcp_control_bound = threading.Event()
         self._tuner_state = {
             i: {
                 "channel": "none",
@@ -348,6 +350,12 @@ class DiscoveryServer:
         for t in threads:
             t.start()
         logger.info("Discovery servers started (SSDP udp :1900, HDHR udp/tcp :65001)")
+
+    def wait_for_critical_listeners(self, timeout=2.0):
+        deadline = time.monotonic() + max(0.0, timeout)
+        if not self._udp_discovery_bound.wait(timeout):
+            return False
+        return self._tcp_control_bound.wait(max(0.0, deadline - time.monotonic()))
 
     def _make_ssdp_response(self, st: str) -> bytes:
         os_ver = platform.platform()
@@ -425,9 +433,13 @@ class DiscoveryServer:
         try:
             sock.bind((self.listen_ip, HDHR_DISCOVERY_PORT))
         except OSError as e:
-            logger.warning(f"Legacy HDHR bind failed on port {HDHR_DISCOVERY_PORT}: {e}")
+            logger.error(
+                f"HDHR discovery UDP bind failed on port {HDHR_DISCOVERY_PORT}: {e}. "
+                "HDHomeRun Setup will not detect tuners until this port is reclaimed."
+            )
             return
 
+        self._udp_discovery_bound.set()
         logger.info("HDHR discovery listener started on udp :65001")
         while not self.stop_event.is_set():
             try:
@@ -489,10 +501,14 @@ class DiscoveryServer:
             sock.bind((self.listen_ip, HDHR_CONTROL_PORT))
             sock.listen(8)
         except OSError as e:
-            logger.warning(f"HDHR control bind failed on tcp :{HDHR_CONTROL_PORT}: {e}")
+            logger.error(
+                f"HDHR control TCP bind failed on port {HDHR_CONTROL_PORT}: {e}. "
+                "WMC cannot tune channels without this listener."
+            )
             sock.close()
             return
 
+        self._tcp_control_bound.set()
         logger.info("HDHR control listener started on tcp :65001")
         while not self.stop_event.is_set():
             try:

@@ -1,5 +1,6 @@
 import os
 import sys
+import threading
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -38,6 +39,26 @@ class TunerProgramSelectionTests(unittest.TestCase):
 
         self.assertEqual(state.get("channel_id"), rf["channel_id"])
         self.assertEqual(state.get("target"), "rtp://169.254.210.93:58236")
+
+
+class DiscoveryListenerWaitTests(unittest.TestCase):
+    def test_wait_requires_udp_and_tcp_listeners(self):
+        server = DiscoveryServer(
+            device_id="104ABCDE",
+            base_url="http://127.0.0.1:5004",
+            tuner_count=1,
+        )
+
+        self.assertFalse(server.wait_for_critical_listeners(timeout=0))
+
+        server._udp_discovery_bound.set()
+        self.assertFalse(server.wait_for_critical_listeners(timeout=0))
+
+        def set_control():
+            server._tcp_control_bound.set()
+
+        threading.Timer(0.01, set_control).start()
+        self.assertTrue(server.wait_for_critical_listeners(timeout=0.5))
 
 
 if __name__ == "__main__":

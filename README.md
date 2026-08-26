@@ -599,7 +599,21 @@ The code avoids mandatory third-party runtime dependencies so it can run on olde
 
 ### Port 65001 is already in use
 
-HDHomeRun legacy discovery/control uses port `65001`. Stop the conflicting service or run on a machine where that port is available. Some HDHomeRun tools expect this exact port.
+HDHomeRun legacy discovery/control uses port `65001`. Some Windows configurations reserve UDP `65001` for WinNAT, even when no process owns it. The proxy now exits immediately if either critical listener cannot bind, because clients may discover a broken device with no tuners.
+
+Check the reservation:
+
+```powershell
+netsh interface ipv4 show excludedportrange protocol=udp
+```
+
+If the range includes `65001`, run this repository script from an elevated PowerShell window:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\repair_hdhr_port.ps1
+```
+
+The script stops WinNAT, persistently reserves only UDP `65001` so future NAT startup cannot reclaim it, restarts WinNAT, and verifies the exclusion. Restart HDHRProxy afterward. Some HDHomeRun tools require this exact port.
 
 ## Development
 
