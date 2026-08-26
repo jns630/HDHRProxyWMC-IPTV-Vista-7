@@ -16,16 +16,22 @@ Two review sources are supported:
 """
 
 import hashlib
+import json
 import logging
+import os
 import re
+import urllib.parse
+import urllib.request
 import xml.etree.ElementTree as ET
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 REVIEW_SOURCE_NAME = "HDHRProxy"
 REVIEW_REVIEWER_NAME = "HDHRProxy Guide Reviews"
 MAX_REVIEW_LENGTH = 320
+REVIEW_USER_AGENT = "HDHRProxyWMC-GuideReviews/1.0"
+REVIEW_CACHE_VERSION = 1
 
 _TONE_POSITIVE = "positive"
 _TONE_MIXED = "mixed"
@@ -152,7 +158,13 @@ def synthesize_review(
     return _clamp_review("{0} {1}. {2}".format(verdict, middle, closer))
 
 
-def enrich_xmltv_with_reviews(xmltv_xml: str, generate_missing: bool = True) -> Tuple[str, int]:
+def enrich_xmltv_with_reviews(
+    xmltv_xml: str,
+    generate_missing: bool = True,
+    provider: str = "tvmaze",
+    api_key: Optional[str] = None,
+    cache_file: Optional[str] = None,
+) -> Tuple[str, int]:
     """Attach <review> elements to every programme in an XMLTV document.
 
     Existing source reviews are preserved. Returns the enriched document
@@ -167,6 +179,8 @@ def enrich_xmltv_with_reviews(xmltv_xml: str, generate_missing: bool = True) -> 
         return xmltv_xml, 0
 
     generated = 0
+    persistent_cache = PersistentReviewCache(cache_file)
+    runtime_lookups: Dict[str, Optional[Tuple[str, str, str]]] = {}
     for programme in root.findall("programme"):
         if extract_review_text(programme):
             continue
@@ -183,18 +197,47 @@ def enrich_xmltv_with_reviews(xmltv_xml: str, generate_missing: bool = True) -> 
             title,
             episode_title or "",
         ])
-        review = synthesize_review(title, episode_title, year, categories, half_stars, seed)
-        ET.SubElement(programme, "review", {
-            "type": "text",
-            "source": REVIEW_SOURCE_NAME,
-            "reviewer": REVIEW_REVIEWER_NAME,
-            "lang": "en",
-        }).text = review
-        generated += 1
+        provider_review = None
+        if title and cache_file:
+            lookup_key = _lookup_key(title, year, provider)
+            if lookup_key in runtime_lookups:
+                provider_review = runtime_lookups[lookup_key]
+            else:
+                provider_review = persistent_cache.get(lookup_key)
+                if lookup_key not in persistent_cache:
+                    provider_review = _fetch_provider_review(
+                        provider,
+                        title,
+                        year,
+                        bool(any(token in " ".join(categories).lower()
+                                 for token in ("movie", "film", "cinema"))),
+                        api_key,
+                    )
+                    persistent_cache.set(lookup_key, provider_review)
+                runtime_lookups[lookup_key] = provider_review
 
-    if not generated:
+        if provider_review:
+            review_text, source_name, reviewer_name = provider_review
+            review_attrs = {"type": "text", "source": source_name, "reviewer": reviewer_name, "lang": "en"}
+        else:
+            review_text = synthesize_review(title, episode_title, year, categories, half_stars, seed)
+            review_attrs = {
+                "type": "text",
+                "source": REVIEW_SOURCE_NAME,
+                "reviewer": REVIEW_REVIEWER_NAME,
+                "lang": "en",
+            }
+            generated += 1
+        ET.SubElement(programme, "review", review_attrs).text = review_text
+
+    if persistent_cache.dirty:
+        persistent_cache.save_if_dirty()
+    if not generated and not any(
+        review.attrib.get("source") != REVIEW_SOURCE_NAME
+        for programme in root.findall("programme")
+        for review in programme.findall("review")
+    ):
         return xmltv_xml, 0
-
     enriched = ET.tostring(root, encoding="unicode")
     if not enriched.lstrip().startswith("<?xml"):
         enriched = '<?xml version="1.0" encoding="UTF-8"?>\n' + enriched
@@ -288,3 +331,199 @@ def _clamp_review(text: str) -> str:
         return text
     clipped = text[:MAX_REVIEW_LENGTH - 1].rsplit(" ", 1)[0].rstrip(",;")
     return clipped + "."
+
+
+class PersistentReviewCache:
+    """Small JSON cache used to avoid repeated guide metadata lookups."""
+
+    def __init__(self, path: Optional[str]):
+        self.path = path
+        self.dirty = False
+        self.data: Dict[str, Any] = {"version": REVIEW_CACHE_VERSION, "reviews": {}}
+        self._load()
+
+    def __contains__(self, key: str) -> bool:
+        return key in self.data["reviews"]
+
+    def get(self, key: str) -> Optional[Tuple[str, str, str]]:
+        value = self.data["reviews"].get(key)
+        if value is None:
+            return None
+        try:
+            return (str(value["review"]), str(value["source"]), str(value["reviewer"]))
+        except (KeyError, TypeError):
+            return None
+
+    def set(self, key: str, value: Optional[Tuple[str, str, str]]) -> None:
+        serialized = None
+        if value is not None:
+            serialized = {"review": value[0], "source": value[1], "reviewer": value[2]}
+        self.data["reviews"][key] = serialized
+        self.dirty = True
+
+    def _load(self) -> None:
+        if not self.path or not os.path.exists(self.path):
+            return
+        try:
+            with open(self.path, "r", encoding="utf-8") as handle:
+                loaded = json.load(handle)
+            if loaded.get("version") == REVIEW_CACHE_VERSION and isinstance(loaded.get("reviews"), dict):
+                self.data["reviews"] = loaded["reviews"]
+        except (OSError, ValueError, TypeError):
+            logger.warning("Ignoring unreadable guide review cache: %s", self.path)
+
+    def save_if_dirty(self) -> None:
+        if not self.path or not self.dirty:
+            return
+        directory = os.path.dirname(os.path.abspath(self.path))
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        temporary_path = self.path + ".tmp"
+        try:
+            with open(temporary_path, "w", encoding="utf-8") as handle:
+                json.dump(self.data, handle, ensure_ascii=False, separators=(",", ":"))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, self.path)
+            self.dirty = False
+        except OSError as exc:
+            logger.warning("Unable to save guide review cache %s: %s", self.path, exc)
+
+
+def _lookup_key(title: str, year: Optional[str], provider: str) -> str:
+    return "{0}|{1}|{2}".format(provider.lower(), _normalize_title(title), year or "")
+
+
+def _normalize_title(title: str) -> str:
+    value = re.sub(r"[^\w\s]", " ", title.lower())
+    value = re.sub(r"\s+", " ", value).strip()
+    if value.startswith("the ") and len(value) > 6:
+        value = value[4:]
+    return value
+
+
+def _fetch_provider_review(
+    provider: str,
+    title: str,
+    year: Optional[str],
+    is_movie: bool,
+    api_key: Optional[str],
+) -> Optional[Tuple[str, str, str]]:
+    normalized_provider = (provider or "").strip().lower()
+    try:
+        if normalized_provider == "tvmaze":
+            return _fetch_tvmaze_review(title, year)
+        if normalized_provider == "tmdb":
+            return _fetch_tmdb_review(title, year, is_movie, api_key)
+        if normalized_provider == "omdb":
+            return _fetch_omdb_review(title, year, api_key)
+    except Exception as exc:
+        logger.debug("Guide review lookup failed for %s (%s): %s", title, provider, exc)
+        return None
+    logger.warning("Unknown guide review provider: %s", provider)
+    return None
+
+
+def _request_json(url: str) -> Any:
+    request = urllib.request.Request(url, headers={
+        "User-Agent": REVIEW_USER_AGENT,
+        "Accept": "application/json",
+    })
+    with urllib.request.urlopen(request, timeout=3.5) as response:
+        encoding = response.headers.get_content_charset() or "utf-8"
+        return json.loads(response.read().decode(encoding))
+
+
+def _fetch_tvmaze_review(title: str, year: Optional[str]) -> Optional[Tuple[str, str, str]]:
+    url = "https://api.tvmaze.com/search/shows?q={0}".format(urllib.parse.quote_plus(title))
+    results = _request_json(url)
+    for item in results if isinstance(results, list) else []:
+        show = item.get("show") if isinstance(item, dict) else None
+        if not show:
+            continue
+        premiered_year = str(show.get("premiered") or "")[:4]
+        if year and premiered_year and premiered_year != str(year):
+            continue
+        name = str(show.get("name") or "")
+        rating_data = show.get("rating")
+        rating = rating_data.get("average") if isinstance(rating_data, dict) else None
+        summary_html = str(show.get("summary") or "")
+        summary = re.sub(r"<[^>]+>", " ", summary_html)
+        summary = re.sub(r"\s+", " ", summary).strip()
+        sentences = []
+        try:
+            sentences.append("{0} holds a TVmaze audience rating of {1:g}/10.".format(name, float(rating)))
+        except (TypeError, ValueError):
+            pass
+        first_sentence = re.split(r"(?<=[.!?])\s+", summary, maxsplit=1)[0] if summary else ""
+        if first_sentence:
+            sentences.append(first_sentence)
+        review = _clamp_review(" ".join(sentences))
+        if review:
+            return review, "TVmaze", "TVmaze audience ratings"
+    return None
+
+
+def _fetch_tmdb_review(
+    title: str,
+    year: Optional[str],
+    is_movie: bool,
+    api_key: Optional[str],
+) -> Optional[Tuple[str, str, str]]:
+    if not api_key:
+        return None
+    params = {"api_key": api_key, "query": title, "include_adult": "false"}
+    if year:
+        params["year" if is_movie else "first_air_date_year"] = year
+    payload = _request_json("https://api.themoviedb.org/3/search/multi?" + urllib.parse.urlencode(params))
+    results = payload.get("results", []) if isinstance(payload, dict) else []
+    for result in results:
+        media_type = result.get("media_type")
+        if media_type not in ("movie", "tv"):
+            continue
+        release_date = str(result.get("release_date") or result.get("first_air_date") or "")
+        if year and release_date[:4] and release_date[:4] != str(year):
+            continue
+        name = str(result.get("name") or result.get("title") or title)
+        return _rating_review(name, result.get("vote_average"), "TMDB")
+    return None
+
+
+def _fetch_omdb_review(
+    title: str,
+    year: Optional[str],
+    api_key: Optional[str],
+) -> Optional[Tuple[str, str, str]]:
+    if not api_key:
+        return None
+    params = {"apikey": api_key, "t": title}
+    if year:
+        params["y"] = year
+    payload = _request_json("https://www.omdbapi.com/?" + urllib.parse.urlencode(params))
+    if not isinstance(payload, dict) or payload.get("Response") != "True":
+        return None
+    sentences = []
+    imdb_rating = payload.get("imdbRating")
+    imdb_votes = payload.get("imdbVotes")
+    metascore = payload.get("Metascore")
+    if imdb_rating and imdb_rating != "N/A":
+        sentence = "{0} has an IMDb audience rating of {1}/10".format(payload.get("Title") or title, imdb_rating)
+        if imdb_votes and imdb_votes != "N/A":
+            sentence += " from {0} ratings".format(imdb_votes)
+        sentences.append(sentence + ".")
+    if metascore and metascore != "N/A":
+        sentences.append("Its Metascore is {0}/100.".format(metascore))
+    plot = re.split(r"(?<=[.!?])\s+", str(payload.get("Plot") or ""), maxsplit=1)[0]
+    if plot and plot != "N/A":
+        sentences.append(plot)
+    review = _clamp_review(" ".join(sentences))
+    return (review, "OMDb", "IMDb, Metacritic, and OMDb data") if review else None
+
+
+def _rating_review(name: str, rating: Any, source: str) -> Optional[Tuple[str, str, str]]:
+    try:
+        numeric_rating = float(rating)
+    except (TypeError, ValueError):
+        return None
+    review = _clamp_review("{0} has a {1} audience rating of {2:g}/10.".format(name, source, numeric_rating))
+    return (review, source, "{0} audience ratings".format(source)) if review else None

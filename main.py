@@ -380,9 +380,15 @@ def run_proxy(cfg: Config):
     xmltv_data = load_xmltv(cfg.xmltv_file, cfg.xmltv_url, channel_map)
     if xmltv_data and bool(cfg.get("guide_reviews", True)):
         generate_reviews = bool(cfg.get("generate_guide_reviews", True))
+        review_cache_file = cfg.get("guide_review_cache_file")
+        if review_cache_file:
+            review_cache_file = os.path.abspath(os.path.expandvars(os.path.expanduser(review_cache_file)))
         xmltv_data.filtered_xml, generated_review_count = enrich_xmltv_with_reviews(
             xmltv_data.filtered_xml,
             generate_missing=generate_reviews,
+            provider=cfg.get("guide_review_provider", "tvmaze"),
+            api_key=cfg.get("guide_review_api_key"),
+            cache_file=review_cache_file,
         )
         logger.info(
             "Guide reviews enabled: %s programmes carry reviews (%s generated).",
@@ -585,6 +591,9 @@ Examples:
     parser.add_argument("--guide-only-lineup", action="store_true", help="Only advertise channels that matched XMLTV/MXF guide data")
     parser.add_argument("--no-guide-reviews", action="store_true", help="Disable guide reviews in XMLTV output and WMC descriptions")
     parser.add_argument("--no-generated-reviews", action="store_true", help="Keep source reviews but stop generating reviews for programmes that lack them")
+    parser.add_argument("--guide-review-provider", default="tvmaze", choices=["tvmaze", "tmdb", "omdb"], help="Metadata provider used before deterministic review fallback")
+    parser.add_argument("--guide-review-api-key", help="API key required by the TMDB or OMDb guide review provider")
+    parser.add_argument("--guide-review-cache-file", default="guide_reviews.cache.json", help="Persistent JSON cache for provider review lookups")
     parser.add_argument(
         "--hls-base-url",
         help="Original web URL for a saved HLS master playlist that uses relative variant/segment URLs",
@@ -660,6 +669,12 @@ Examples:
         cfg.generate_guide_reviews = False
     if args.no_generated_reviews:
         cfg.generate_guide_reviews = False
+    if args.guide_review_provider:
+        cfg.guide_review_provider = args.guide_review_provider
+    if args.guide_review_api_key:
+        cfg.guide_review_api_key = args.guide_review_api_key
+    if args.guide_review_cache_file:
+        cfg.guide_review_cache_file = os.path.abspath(os.path.expandvars(os.path.expanduser(args.guide_review_cache_file)))
     if args.port:
         cfg.http_port = args.port
     if args.listen_ip:

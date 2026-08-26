@@ -19,9 +19,11 @@ from hdhr_proxy.config import Config  # noqa: E402
 from hdhr_proxy.m3u_parser import M3UChannel, build_lineup  # noqa: E402
 from hdhr_proxy.mxf import write_mxf  # noqa: E402
 from hdhr_proxy.reviews import (  # noqa: E402
+    _lookup_key,
     enrich_xmltv_with_reviews,
     extract_review_text,
     merge_review_into_description,
+    PersistentReviewCache,
     synthesize_review,
 )
 
@@ -75,6 +77,24 @@ class ReviewEnrichmentTests(unittest.TestCase):
         _, generated = enrich_xmltv_with_reviews(SAMPLE_XMLTV, generate_missing=False)
         self.assertEqual(generated, 0)
 
+    def test_default_provider_failure_falls_back_without_network(self):
+        def fail_fetch(*args):
+            raise AssertionError("provider lookup should not run without a cache file")
+
+        module = __import__("hdhr_proxy.reviews", fromlist=["enrich_xmltv_with_reviews"])
+        original = module._fetch_provider_review
+        module._fetch_provider_review = fail_fetch
+        try:
+            enriched, generated = enrich_xmltv_with_reviews(
+                SAMPLE_XMLTV, generate_missing=True, provider="none"
+            )
+        finally:
+            module._fetch_provider_review = original
+        self.assertEqual(generated, 1)
+        root = ET.fromstring(enriched)
+        review = root.findall("programme")[1].find("review")
+        self.assertEqual(review.attrib.get("source"), "HDHRProxy")
+
     def test_invalid_xml_returns_original(self):
         original = "not xml at all"
         output, generated = enrich_xmltv_with_reviews(original)
@@ -108,6 +128,78 @@ class ReviewMergeTests(unittest.TestCase):
 
     def test_merge_without_review_keeps_description(self):
         self.assertEqual(merge_review_into_description("Just a plot.", None), "Just a plot.")
+
+
+class ProviderReviewTests(unittest.TestCase):
+    def test_provider_review_is_labeled_and_not_fallback_counted(self):
+        with tempfile.TemporaryDirectory() as cache_dir:
+            cache_file = os.path.join(cache_dir, "reviews.json")
+
+            def fake_fetch(provider, title, year, is_movie, api_key):
+                self.assertEqual((provider, title), ("tvmaze", "Morning News"))
+                return ("Real provider summary.", "TVmaze", "TVmaze audience ratings")
+
+            module = __import__("hdhr_proxy.reviews", fromlist=["enrich_xmltv_with_reviews"])
+            original = module._fetch_provider_review
+            module._fetch_provider_review = fake_fetch
+            try:
+                enriched, generated = enrich_xmltv_with_reviews(
+                    SAMPLE_XMLTV,
+                    generate_missing=True,
+                    provider="tvmaze",
+                    api_key=None,
+                    cache_file=cache_file,
+                )
+            finally:
+                module._fetch_provider_review = original
+
+            root = ET.fromstring(enriched)
+            review = root.findall("programme")[1].find("review")
+            self.assertEqual(generated, 0)
+            self.assertEqual(review.attrib.get("source"), "TVmaze")
+            self.assertEqual(review.text.strip(), "Real provider summary.")
+            with open(cache_file, "r", encoding="utf-8") as handle:
+                cached = json.load(handle)
+            self.assertEqual(len(cached["reviews"]), 1)
+
+    def test_cached_lookup_avoids_second_fetch(self):
+        calls = []
+
+        def fake_fetch(provider, title, year, is_movie, api_key):
+            calls.append(title)
+            return ("Cached real review.", "TVmaze", "TVmaze")
+
+        with tempfile.TemporaryDirectory() as cache_dir:
+            cache_file = os.path.join(cache_dir, "reviews.json")
+            module = __import__("hdhr_proxy.reviews", fromlist=["enrich_xmltv_with_reviews"])
+            original = module._fetch_provider_review
+            module._fetch_provider_review = fake_fetch
+            try:
+                first = enrich_xmltv_with_reviews(
+                    SAMPLE_XMLTV, True, "tvmaze", None, cache_file
+                )[0]
+                second = enrich_xmltv_with_reviews(
+                    SAMPLE_XMLTV, True, "tvmaze", None, cache_file
+                )[0]
+            finally:
+                module._fetch_provider_review = original
+
+        self.assertEqual(calls, ["Morning News"])
+        self.assertEqual(first, second)
+
+    def test_cache_persists_positive_and_negative_results(self):
+        cache = PersistentReviewCache(None)
+        value = ("Review.", "Source", "Reviewer")
+        cache.set("positive", value)
+        cache.set("negative", None)
+        self.assertEqual(cache.get("positive"), value)
+        self.assertIn("negative", cache)
+        self.assertIsNone(cache.get("negative"))
+
+    def test_lookup_key_normalizes_titles(self):
+        key_a = _lookup_key("The Morning News!", "2020", "TVMaze")
+        key_b = _lookup_key("morning news", "2020", "tvmaze")
+        self.assertEqual(key_a, key_b)
 
 
 class MxfReviewIntegrationTests(unittest.TestCase):
