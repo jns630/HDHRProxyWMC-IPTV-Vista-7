@@ -1,4 +1,5 @@
 import copy
+import gzip
 import logging
 import re
 import urllib.request
@@ -41,16 +42,33 @@ def _fetch_xmltv_url(url: str) -> str:
         headers={
             "User-Agent": "VirtualHDHR/1.0",
             "Accept": "application/xml,text/xml,*/*",
+            "Accept-Encoding": "gzip",
         },
     )
     with urllib.request.urlopen(req, timeout=30) as resp:
-        return resp.read().decode("utf-8", errors="replace")
+        data = resp.read()
+        if _is_gzip(data, resp.headers.get("Content-Encoding"), url):
+            logger.info("Decompressing gzip XMLTV guide from URL: %s", url)
+            data = gzip.decompress(data)
+        return data.decode("utf-8", errors="replace")
 
 
 def _read_xmltv_file(path: str) -> str:
     logger.info("Reading XMLTV guide from file: %s", path)
-    with open(path, "r", encoding="utf-8", errors="replace") as f:
-        return f.read()
+    with open(path, "rb") as f:
+        data = f.read()
+    if _is_gzip(data, None, path):
+        logger.info("Decompressing gzip XMLTV guide from file: %s", path)
+        data = gzip.decompress(data)
+    return data.decode("utf-8", errors="replace")
+
+
+def _is_gzip(data: bytes, content_encoding: Optional[str], name: str) -> bool:
+    if content_encoding and content_encoding.strip().lower() == "gzip":
+        return True
+    if name.lower().endswith(".gz"):
+        return True
+    return len(data) >= 2 and data[:2] == b"\x1f\x8b"
 
 
 def _filter_xmltv(raw_xml: str, channel_map: Dict[str, M3UChannel]) -> Tuple[str, Set[str]]:
