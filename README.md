@@ -73,8 +73,6 @@ These fixes were added specifically to prevent wrong-channel playback, black scr
 
 ### Current working build
 
-- Added EPG guide reviews: programmes in the served XMLTV (`/xmltv.xml`, `/epg.xml`) now carry `<review>` elements, and the MXF/Vista guide exports fold the review text into the programme description.
-- Reviews come from the upstream XMLTV `<review>` elements when the provider supplies them; missing ones are filled with short deterministic editorial blurbs generated from title, year, genre, and star rating.
 - Added richer Rovi/EPG123-style MXF guide metadata for WMC, including populated keyword groups, guide images, movie flags, series flags, news flags, genre hints, short descriptions, and fallback star metadata.
 - Improved Pluto-style XMLTV imports that only provide title, description, and artwork by inferring movie, series, and news guide categories from the active M3U lineup and channel names.
 - Fixed EPG123 MXF import compatibility by generating numeric guide image IDs instead of hex-style IDs.
@@ -238,8 +236,6 @@ python main.py --config config.json --tuners 4
 | `hls_base_url` | Original URL for a saved local HLS playlist with relative variant paths. | `null` |
 | `xmltv_file` | Path to a local XMLTV guide file to serve from the proxy. | `null` |
 | `xmltv_url` | URL to a remote XMLTV guide file to fetch and serve from the proxy. | `null` |
-| `guide_reviews` | Attach `<review>` elements to served XMLTV programmes and fold reviews into WMC descriptions. | `true` |
-| `generate_guide_reviews` | Generate editorial review blurbs for programmes that have no source review. Requires `guide_reviews`. | `true` |
 | `ffmpeg_path` | Path or command name for ffmpeg. | `ffmpeg` |
 | `ffmpeg_enabled` | Enables ffmpeg transcoding. | `true` |
 | `ffmpeg_output_codec` | Configured video codec. At runtime, WMC mode forces Vista to `mpeg2video` and Windows 7 or newer to `libx264` H.264/MPEG-4 AVC. | `mpeg2video` |
@@ -274,17 +270,6 @@ Notes:
 - If playlist entries include `tvg-id`, the proxy filters the XMLTV output down to just the matching channels and programmes.
 - If the playlist does not include `tvg-id`, the proxy serves the full XMLTV file unchanged.
 - The served guide URL is `http://<your-pc-ip>:5004/xmltv.xml`.
-
-### Guide reviews
-
-The proxy attaches short reviews to every programme it serves and exports:
-
-- Reviews present in the upstream XMLTV (`<review type="text">`) are passed through untouched.
-- Programmes without a source review get a short generated editorial blurb, synthesized deterministically from the title, year, categories, and star rating, so the same programme always shows the same review.
-- Generated reviews are labeled with `source="HDHRProxy"` in the XMLTV output.
-- The same review text is appended as a `Review:` line to the long description inside the generated MXF and Vista guide exports, so Windows Media Center shows it in programme details.
-
-Disable the feature entirely with `--no-guide-reviews`, or keep provider reviews but stop generating new ones with `--no-generated-reviews`. Both are also available as `guide_reviews` / `generate_guide_reviews` config keys.
 
 ### Generate and import WMC MXF
 

@@ -43,7 +43,6 @@ from hdhr_proxy.mxf import (
     run_wmc_post_import_tasks,
 )
 from hdhr_proxy.xmltv import load_xmltv
-from hdhr_proxy.reviews import enrich_xmltv_with_reviews
 from hdhr_proxy.vista_guide import (
     import_vista_guide_xml,
     write_vista_guide_xml,
@@ -314,15 +313,6 @@ def find_local_ip() -> str:
         sock.close()
 
 
-def _count_programme_reviews(xmltv_xml: str) -> int:
-    import xml.etree.ElementTree as ET
-    try:
-        root = ET.fromstring(xmltv_xml)
-    except ET.ParseError:
-        return 0
-    return len(root.findall("./programme/review"))
-
-
 def resolve_listen_ip(cfg: Config) -> str:
     ip = cfg.listen_ip
     if ip == "0.0.0.0":
@@ -378,23 +368,6 @@ def run_proxy(cfg: Config):
         programs_per_physical=cfg.get("programs_per_physical"),
     )
     xmltv_data = load_xmltv(cfg.xmltv_file, cfg.xmltv_url, channel_map)
-    if xmltv_data and bool(cfg.get("guide_reviews", True)):
-        generate_reviews = bool(cfg.get("generate_guide_reviews", True))
-        review_cache_file = cfg.get("guide_review_cache_file")
-        if review_cache_file:
-            review_cache_file = os.path.abspath(os.path.expandvars(os.path.expanduser(review_cache_file)))
-        xmltv_data.filtered_xml, generated_review_count = enrich_xmltv_with_reviews(
-            xmltv_data.filtered_xml,
-            generate_missing=generate_reviews,
-            provider=cfg.get("guide_review_provider", "tvmaze"),
-            api_key=cfg.get("guide_review_api_key"),
-            cache_file=review_cache_file,
-        )
-        logger.info(
-            "Guide reviews enabled: %s programmes carry reviews (%s generated).",
-            _count_programme_reviews(xmltv_data.filtered_xml),
-            generated_review_count,
-        )
     generated_mxf_path = None
     auto_match_mxf_path = None
     vista_guide_xml_path = None
@@ -589,11 +562,6 @@ Examples:
     parser.add_argument("--import-auto-match-mxf", action="store_true", help="Generate and import a WMC auto-match MXF mapped to the current lineup")
     parser.add_argument("--map-guide-wmc", action="store_true", help="Generate and import a lineup-matched guide directly into the WMC internal database")
     parser.add_argument("--guide-only-lineup", action="store_true", help="Only advertise channels that matched XMLTV/MXF guide data")
-    parser.add_argument("--no-guide-reviews", action="store_true", help="Disable guide reviews in XMLTV output and WMC descriptions")
-    parser.add_argument("--no-generated-reviews", action="store_true", help="Keep source reviews but stop generating reviews for programmes that lack them")
-    parser.add_argument("--guide-review-provider", default="tvmaze", choices=["tvmaze", "tmdb", "omdb"], help="Metadata provider used before deterministic review fallback")
-    parser.add_argument("--guide-review-api-key", help="API key required by the TMDB or OMDb guide review provider")
-    parser.add_argument("--guide-review-cache-file", default="guide_reviews.cache.json", help="Persistent JSON cache for provider review lookups")
     parser.add_argument(
         "--hls-base-url",
         help="Original web URL for a saved HLS master playlist that uses relative variant/segment URLs",
@@ -664,17 +632,6 @@ Examples:
         cfg.import_auto_match_mxf = True
     if args.guide_only_lineup:
         cfg.guide_only_lineup = True
-    if args.no_guide_reviews:
-        cfg.guide_reviews = False
-        cfg.generate_guide_reviews = False
-    if args.no_generated_reviews:
-        cfg.generate_guide_reviews = False
-    if args.guide_review_provider:
-        cfg.guide_review_provider = args.guide_review_provider
-    if args.guide_review_api_key:
-        cfg.guide_review_api_key = args.guide_review_api_key
-    if args.guide_review_cache_file:
-        cfg.guide_review_cache_file = os.path.abspath(os.path.expandvars(os.path.expanduser(args.guide_review_cache_file)))
     if args.port:
         cfg.http_port = args.port
     if args.listen_ip:

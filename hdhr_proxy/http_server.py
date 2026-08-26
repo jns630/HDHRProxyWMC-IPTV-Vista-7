@@ -113,7 +113,6 @@ class HDHRRequestHandler(BaseHTTPRequestHandler):
                 "LineupURL": f"{get_base_url(self.config)}/lineup.json",
                 "Channels": len(self.lineup),
                 "XMLTVURL": f"{get_base_url(self.config)}/xmltv.xml" if self.xmltv_data else None,
-                "GuideReviews": bool(getattr(self.config, "guide_reviews", True)),
             },
             indent=2,
         )

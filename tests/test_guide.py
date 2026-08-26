@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Stdlib-only tests for the guide review feature and HTTP server behavior.
+"""Stdlib-only tests for guide exports and HTTP server behavior.
 
 Run with:
     python -m unittest discover -s tests -v
@@ -18,15 +18,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from hdhr_proxy.config import Config  # noqa: E402
 from hdhr_proxy.m3u_parser import M3UChannel, build_lineup  # noqa: E402
 from hdhr_proxy.mxf import write_mxf  # noqa: E402
-from hdhr_proxy.reviews import (  # noqa: E402
-    _lookup_key,
-    enrich_xmltv_with_reviews,
-    extract_review_text,
-    merge_review_into_description,
-    PersistentReviewCache,
-    synthesize_review,
-)
-
 MXF_NS = "{urn:com:dontocsata:xmltv:mxf}"
 
 SAMPLE_XMLTV = """<?xml version="1.0" encoding="UTF-8"?>
@@ -40,7 +31,6 @@ SAMPLE_XMLTV = """<?xml version="1.0" encoding="UTF-8"?>
     <category>Movie</category>
     <date>2019</date>
     <star-rating><value>8/10</value></star-rating>
-    <review type="text" source="Upstream">A critic already reviewed this.</review>
   </programme>
   <programme start="20260101080000 +0000" stop="20260101090000 +0000" channel="ch2">
     <title>Morning News</title>
@@ -51,159 +41,8 @@ SAMPLE_XMLTV = """<?xml version="1.0" encoding="UTF-8"?>
 """
 
 
-class ReviewEnrichmentTests(unittest.TestCase):
-    def test_generates_only_missing_reviews(self):
-        enriched, generated = enrich_xmltv_with_reviews(SAMPLE_XMLTV, generate_missing=True)
-        self.assertEqual(generated, 1)
-        root = ET.fromstring(enriched)
-        for programme in root.findall("programme"):
-            self.assertIsNotNone(programme.find("review"))
-
-    def test_source_review_untouched(self):
-        enriched, _ = enrich_xmltv_with_reviews(SAMPLE_XMLTV)
-        root = ET.fromstring(enriched)
-        source = root.findall("programme")[0].find("review")
-        self.assertEqual(source.text.strip(), "A critic already reviewed this.")
-        self.assertEqual(source.attrib.get("source"), "Upstream")
-
-    def test_generated_review_labeled_and_deterministic(self):
-        first, _ = enrich_xmltv_with_reviews(SAMPLE_XMLTV)
-        second, _ = enrich_xmltv_with_reviews(SAMPLE_XMLTV)
-        review_a = extract_review_text(ET.fromstring(first).findall("programme")[1])
-        review_b = extract_review_text(ET.fromstring(second).findall("programme")[1])
-        self.assertEqual(review_a, review_b)
-
-    def test_generate_missing_disabled(self):
-        _, generated = enrich_xmltv_with_reviews(SAMPLE_XMLTV, generate_missing=False)
-        self.assertEqual(generated, 0)
-
-    def test_default_provider_failure_falls_back_without_network(self):
-        def fail_fetch(*args):
-            raise AssertionError("provider lookup should not run without a cache file")
-
-        module = __import__("hdhr_proxy.reviews", fromlist=["enrich_xmltv_with_reviews"])
-        original = module._fetch_provider_review
-        module._fetch_provider_review = fail_fetch
-        try:
-            enriched, generated = enrich_xmltv_with_reviews(
-                SAMPLE_XMLTV, generate_missing=True, provider="none"
-            )
-        finally:
-            module._fetch_provider_review = original
-        self.assertEqual(generated, 1)
-        root = ET.fromstring(enriched)
-        review = root.findall("programme")[1].find("review")
-        self.assertEqual(review.attrib.get("source"), "HDHRProxy")
-
-    def test_invalid_xml_returns_original(self):
-        original = "not xml at all"
-        output, generated = enrich_xmltv_with_reviews(original)
-        self.assertEqual(output, original)
-        self.assertEqual(generated, 0)
-
-    def test_tone_follows_star_rating(self):
-        glowing = synthesize_review("Great Film", None, "2020", ["Movie"], "10", "seed-a")
-        self.assertIn("Great Film", glowing)
-        self.assertTrue(glowing.endswith("."))
-        self.assertLess(len(glowing), 400)
-
-    def test_year_appears_in_closer(self):
-        review = synthesize_review("Old Film", None, "1987", ["Drama"], "9", "seed-b")
-        self.assertIn("(1987)", review)
-
-
-class ReviewMergeTests(unittest.TestCase):
-    def test_merge_appends_to_description(self):
-        merged = merge_review_into_description("Plot summary.", "Nice watch.")
-        self.assertTrue(merged.startswith("Plot summary."))
-        self.assertIn("Review: Nice watch.", merged)
-
-    def test_merge_without_description(self):
-        self.assertEqual(merge_review_into_description(None, "Solo."), "Review: Solo.")
-
-    def test_merge_clamps_length(self):
-        merged = merge_review_into_description("x" * 1500, "Short.")
-        self.assertIsNotNone(merged)
-        self.assertLessEqual(len(merged), 1001)
-
-    def test_merge_without_review_keeps_description(self):
-        self.assertEqual(merge_review_into_description("Just a plot.", None), "Just a plot.")
-
-
-class ProviderReviewTests(unittest.TestCase):
-    def test_provider_review_is_labeled_and_not_fallback_counted(self):
-        with tempfile.TemporaryDirectory() as cache_dir:
-            cache_file = os.path.join(cache_dir, "reviews.json")
-
-            def fake_fetch(provider, title, year, is_movie, api_key):
-                self.assertEqual((provider, title), ("tvmaze", "Morning News"))
-                return ("Real provider summary.", "TVmaze", "TVmaze audience ratings")
-
-            module = __import__("hdhr_proxy.reviews", fromlist=["enrich_xmltv_with_reviews"])
-            original = module._fetch_provider_review
-            module._fetch_provider_review = fake_fetch
-            try:
-                enriched, generated = enrich_xmltv_with_reviews(
-                    SAMPLE_XMLTV,
-                    generate_missing=True,
-                    provider="tvmaze",
-                    api_key=None,
-                    cache_file=cache_file,
-                )
-            finally:
-                module._fetch_provider_review = original
-
-            root = ET.fromstring(enriched)
-            review = root.findall("programme")[1].find("review")
-            self.assertEqual(generated, 0)
-            self.assertEqual(review.attrib.get("source"), "TVmaze")
-            self.assertEqual(review.text.strip(), "Real provider summary.")
-            with open(cache_file, "r", encoding="utf-8") as handle:
-                cached = json.load(handle)
-            self.assertEqual(len(cached["reviews"]), 1)
-
-    def test_cached_lookup_avoids_second_fetch(self):
-        calls = []
-
-        def fake_fetch(provider, title, year, is_movie, api_key):
-            calls.append(title)
-            return ("Cached real review.", "TVmaze", "TVmaze")
-
-        with tempfile.TemporaryDirectory() as cache_dir:
-            cache_file = os.path.join(cache_dir, "reviews.json")
-            module = __import__("hdhr_proxy.reviews", fromlist=["enrich_xmltv_with_reviews"])
-            original = module._fetch_provider_review
-            module._fetch_provider_review = fake_fetch
-            try:
-                first = enrich_xmltv_with_reviews(
-                    SAMPLE_XMLTV, True, "tvmaze", None, cache_file
-                )[0]
-                second = enrich_xmltv_with_reviews(
-                    SAMPLE_XMLTV, True, "tvmaze", None, cache_file
-                )[0]
-            finally:
-                module._fetch_provider_review = original
-
-        self.assertEqual(calls, ["Morning News"])
-        self.assertEqual(first, second)
-
-    def test_cache_persists_positive_and_negative_results(self):
-        cache = PersistentReviewCache(None)
-        value = ("Review.", "Source", "Reviewer")
-        cache.set("positive", value)
-        cache.set("negative", None)
-        self.assertEqual(cache.get("positive"), value)
-        self.assertIn("negative", cache)
-        self.assertIsNone(cache.get("negative"))
-
-    def test_lookup_key_normalizes_titles(self):
-        key_a = _lookup_key("The Morning News!", "2020", "TVMaze")
-        key_b = _lookup_key("morning news", "2020", "tvmaze")
-        self.assertEqual(key_a, key_b)
-
-
-class MxfReviewIntegrationTests(unittest.TestCase):
-    def test_mxf_descriptions_include_reviews(self):
+class MxfGuideIntegrationTests(unittest.TestCase):
+    def test_mxf_descriptions_preserve_source_text(self):
         base_url = "http://127.0.0.1:5004"
         channels = []
         for index in range(1, 3):
@@ -219,8 +58,7 @@ class MxfReviewIntegrationTests(unittest.TestCase):
             node.attrib.get("description", "")
             for node in ET.parse(out_path).getroot().iter(MXF_NS + "Program")
         ]
-        self.assertTrue(any("Review:" in text for text in descriptions))
-        self.assertTrue(any("A critic already reviewed this." in text for text in descriptions))
+        self.assertTrue(any("An action film about heists." in text for text in descriptions))
 
 
 class HttpServerTests(unittest.TestCase):
@@ -265,9 +103,9 @@ class HttpServerTests(unittest.TestCase):
         self.assertEqual(response.read(), b"")
         self.assertGreater(int(response.headers.get("Content-Length") or 0), 0)
 
-    def test_root_reports_guide_reviews(self):
+    def test_root_reports_channel_count(self):
         body = json.loads(urllib.request.urlopen(self._url("/"), timeout=5).read())
-        self.assertIs(body.get("GuideReviews"), True)
+        self.assertEqual(body.get("Channels"), 3)
 
     @unittest.skipUnless(os.name == "nt", "socket handle cleanup is Windows-specific")
     def test_stream_stops_promptly_when_terminated(self):

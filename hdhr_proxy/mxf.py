@@ -12,7 +12,6 @@ from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from .m3u_parser import M3UChannel
-from .reviews import extract_review_text, merge_review_into_description
 from .xmltv import resolve_channel_xmltv_ids
 
 logger = logging.getLogger(__name__)
@@ -495,7 +494,6 @@ def _collect_programmes(xmltv_xml: str, channel_meta: Dict[str, Dict]) -> Dict[s
         rating, rating_kind = _extract_rating(programme)
         airdate, year = _extract_airdate(programme)
         half_stars = _extract_half_stars(programme)
-        review_text = extract_review_text(programme)
         if is_movie and not half_stars:
             half_stars = "6"
         elif is_series and not half_stars:
@@ -523,7 +521,6 @@ def _collect_programmes(xmltv_xml: str, channel_meta: Dict[str, Dict]) -> Dict[s
             "airdate": airdate,
             "year": year,
             "half_stars": half_stars,
-            "review": review_text,
             "start_time": _to_mxf_time(start_dt),
             "duration": str(duration),
         }
@@ -858,10 +855,7 @@ def _program_mxf_attrs(program: Dict, vista_mode: bool) -> Dict[str, str]:
     }
     if program.get("episode_title"):
         attrs["episodeTitle"] = program["episode_title"]
-    merged_description = merge_review_into_description(
-        program.get("description"),
-        program.get("review"),
-    )
+    merged_description = program.get("description")
     if merged_description:
         attrs["description"] = merged_description
     if program.get("short_description"):
