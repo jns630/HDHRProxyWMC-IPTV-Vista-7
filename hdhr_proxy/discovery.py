@@ -2746,7 +2746,7 @@ class DiscoveryServer:
         if codec in ("h264", "libx264", "mpeg4_h264", "mpeg4-avc", "avc"):
             return [
                 "-c:v", "libx264",
-                "-preset", "veryfast",
+                "-preset", "ultrafast",
                 "-tune", "zerolatency",
                 "-x264-params", "nal-hrd=cbr:force-cfr=1",
                 "-profile:v", "high",
