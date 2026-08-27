@@ -2669,6 +2669,30 @@ class DiscoveryServer:
                     crc = (crc << 1) & 0xFFFFFFFF
         return crc
 
+    def _ffmpeg_reconnect_args(self, ffmpeg_path: str) -> List[str]:
+        try:
+            result = subprocess.run(
+                [ffmpeg_path, "-hide_banner", "-h", "full"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except Exception:
+            return ["-reconnect_at_eof", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2"]
+
+        help_text = (result.stdout or "") + "\n" + (result.stderr or "")
+        if "reconnect_on_network_error" in help_text or "reconnect_on_http_error" in help_text:
+            return [
+                "-reconnect_at_eof", "1",
+                "-reconnect_streamed", "1",
+                "-reconnect_delay_max", "2",
+                "-reconnect_on_network_error", "1",
+            ]
+        if "reconnect" in help_text:
+            return ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2"]
+        return ["-reconnect_at_eof", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2"]
+
     def _build_udp_ffmpeg_cmd(self, source_url: str, rf: Optional[Dict] = None) -> List[str]:
         service_id = int(rf.get("program", ATSC_PROGRAM_NUMBER)) if rf else ATSC_PROGRAM_NUMBER
         ts_id = int(rf.get("physical", 1)) if rf else 1
@@ -2688,19 +2712,15 @@ class DiscoveryServer:
             "-probesize", FFMPEG_COPY_PROBE_BYTES,
         ]
         if self._is_network_media_source(source_url):
-            input_args.extend([
-                "-rw_timeout", "15000000",
-                "-reconnect_at_eof", "1",
-                "-reconnect_streamed", "1",
-                "-reconnect_delay_max", "2",
-                "-user_agent", "VLC/3.0.20 LibVLC/3.0.20",
-            ])
+            input_args.extend(["-rw_timeout", "15000000"])
+            input_args.extend(self._ffmpeg_reconnect_args(self.ffmpeg_path))
+            input_args.extend(["-user_agent", "VLC/3.0.20 LibVLC/3.0.20"])
             parsed = urllib.parse.urlparse(source_url or "")
             if parsed.path.lower().endswith((".m3u8", ".m3u")):
-                input_args.extend([
-                    "-reconnect_on_network_error", "1",
-                    "-reconnect_on_http_error", "429,500,502,503,504",
-                ])
+                if "reconnect_on_network_error" in self._ffmpeg_reconnect_args(self.ffmpeg_path):
+                    input_args.extend([
+                        "-reconnect_on_http_error", "429,500,502,503,504",
+                    ])
                 input_args.extend([
                     "-thread_queue_size", "1024",
                     "-protocol_whitelist", "file,http,https,tcp,tls,crypto,udp,rtp",

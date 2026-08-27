@@ -2,6 +2,7 @@ import os
 import sys
 import threading
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -59,6 +60,47 @@ class DiscoveryListenerWaitTests(unittest.TestCase):
 
         threading.Timer(0.01, set_control).start()
         self.assertTrue(server.wait_for_critical_listeners(timeout=0.5))
+
+
+class FfmpegReconnectCompatibilityTests(unittest.TestCase):
+    def test_legacy_ffmpeg_uses_legacy_reconnect_flags(self):
+        server = DiscoveryServer(
+            device_id="104ABCDE",
+            base_url="http://127.0.0.1:5004",
+            tuner_count=1,
+        )
+
+        with mock.patch("hdhr_proxy.discovery.subprocess.run") as mock_run:
+            mock_run.return_value.stdout = "FFmpeg version 4.1.0\n-has option reconnect\n"
+            mock_run.return_value.stderr = ""
+            mock_run.return_value.returncode = 0
+
+            self.assertEqual(
+                server._ffmpeg_reconnect_args("ffmpeg"),
+                ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2"],
+            )
+
+    def test_modern_ffmpeg_uses_network_error_reconnect_flags(self):
+        server = DiscoveryServer(
+            device_id="104ABCDE",
+            base_url="http://127.0.0.1:5004",
+            tuner_count=1,
+        )
+
+        with mock.patch("hdhr_proxy.discovery.subprocess.run") as mock_run:
+            mock_run.return_value.stdout = "FFmpeg version N-1234\n-- reconnect_on_network_error\nreconnect_at_eof\n"
+            mock_run.return_value.stderr = ""
+            mock_run.return_value.returncode = 0
+
+            self.assertEqual(
+                server._ffmpeg_reconnect_args("ffmpeg"),
+                [
+                    "-reconnect_at_eof", "1",
+                    "-reconnect_streamed", "1",
+                    "-reconnect_delay_max", "2",
+                    "-reconnect_on_network_error", "1",
+                ],
+            )
 
 
 if __name__ == "__main__":

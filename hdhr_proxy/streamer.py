@@ -29,6 +29,32 @@ FFMPEG_INPUT_OPTIONS = [
 ]
 
 
+def _ffmpeg_reconnect_args(ffmpeg_path: str) -> list[str]:
+    try:
+        result = subprocess.run(
+            [ffmpeg_path, "-hide_banner", "-h", "full"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except Exception:
+        return ["-reconnect_at_eof", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2"]
+
+    help_text = (result.stdout or "") + "\n" + (result.stderr or "")
+    modern = "reconnect_on_network_error" in help_text or "reconnect_on_http_error" in help_text
+    if modern:
+        return [
+            "-reconnect_at_eof", "1",
+            "-reconnect_streamed", "1",
+            "-reconnect_delay_max", "2",
+            "-reconnect_on_network_error", "1",
+        ]
+    if "reconnect" in help_text:
+        return ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2"]
+    return ["-reconnect_at_eof", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2"]
+
+
 def _needs_pluto_headers(source_url: str) -> bool:
     host = urllib.parse.urlparse(source_url or "").netloc.lower()
     return "pluto.tv" in host or "jmp2.uk" in host
@@ -248,13 +274,13 @@ def ffmpeg_transcode_stream(
         "-analyzeduration", FFMPEG_COPY_ANALYZE_US,
         "-probesize", FFMPEG_COPY_PROBE_BYTES,
         "-protocol_whitelist", "file,http,https,tcp,tls,crypto,udp,rtp",
-        "-reconnect_at_eof", "1",
-        "-reconnect_streamed", "1",
-        "-reconnect_delay_max", "2",
+    ]
+    cmd.extend(_ffmpeg_reconnect_args(ffmpeg_path))
+    cmd.extend([
         "-rw_timeout", "15000000",
         "-thread_queue_size", "1024",
         "-user_agent", "VLC/3.0.20 LibVLC/3.0.20",
-    ]
+    ])
     if _needs_pluto_headers(source_url):
         cmd.extend([
             "-headers", "Accept: application/vnd.apple.mpegurl,application/x-mpegURL,*/*\r\nOrigin: https://pluto.tv\r\nReferer: https://pluto.tv/\r\n",
