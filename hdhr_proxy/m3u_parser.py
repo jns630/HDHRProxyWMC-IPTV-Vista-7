@@ -1,9 +1,12 @@
 import re
 import urllib.request
 import urllib.parse
+import urllib.error
 import logging
 import os
 from typing import List, Dict, Optional, Tuple
+
+from .http_utils import decode_http_body
 
 logger = logging.getLogger(__name__)
 
@@ -47,10 +50,22 @@ class M3UParser:
             headers={
                 "User-Agent": "VLC/3.0.20 LibVLC/3.0.20",
                 "Accept": "*/*",
+                "Accept-Encoding": "gzip",
             },
         )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            raw = resp.read().decode("utf-8", errors="replace")
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                data = resp.read()
+                headers = resp.headers
+        except urllib.error.HTTPError as exc:
+            logger.error("M3U playlist fetch failed (HTTP %s) for URL: %s", exc.code, url)
+            raise
+        except urllib.error.URLError as exc:
+            logger.error("M3U playlist fetch failed (%s) for URL: %s", exc.reason, url)
+            raise
+        raw = decode_http_body(data, headers=headers, name=url, context="remote M3U playlist").decode(
+            "utf-8", errors="replace"
+        )
         master_channel = cls._hls_master_as_channel(raw, url)
         if master_channel:
             return [master_channel]

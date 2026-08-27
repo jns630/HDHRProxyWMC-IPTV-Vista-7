@@ -1,11 +1,12 @@
 import copy
-import gzip
 import logging
 import re
+import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 from typing import Dict, Iterable, Optional, Set, Tuple
 
+from .http_utils import decode_http_body
 from .m3u_parser import M3UChannel
 
 logger = logging.getLogger(__name__)
@@ -45,30 +46,26 @@ def _fetch_xmltv_url(url: str) -> str:
             "Accept-Encoding": "gzip",
         },
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        data = resp.read()
-        if _is_gzip(data, resp.headers.get("Content-Encoding"), url):
-            logger.info("Decompressing gzip XMLTV guide from URL: %s", url)
-            data = gzip.decompress(data)
-        return data.decode("utf-8", errors="replace")
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = resp.read()
+            headers = resp.headers
+    except urllib.error.HTTPError as exc:
+        logger.error("XMLTV guide fetch failed (HTTP %s) for URL: %s", exc.code, url)
+        raise
+    except urllib.error.URLError as exc:
+        logger.error("XMLTV guide fetch failed (%s) for URL: %s", exc.reason, url)
+        raise
+    return decode_http_body(data, headers=headers, name=url, context="remote XMLTV guide").decode(
+        "utf-8", errors="replace"
+    )
 
 
 def _read_xmltv_file(path: str) -> str:
     logger.info("Reading XMLTV guide from file: %s", path)
     with open(path, "rb") as f:
         data = f.read()
-    if _is_gzip(data, None, path):
-        logger.info("Decompressing gzip XMLTV guide from file: %s", path)
-        data = gzip.decompress(data)
-    return data.decode("utf-8", errors="replace")
-
-
-def _is_gzip(data: bytes, content_encoding: Optional[str], name: str) -> bool:
-    if content_encoding and content_encoding.strip().lower() == "gzip":
-        return True
-    if name.lower().endswith(".gz"):
-        return True
-    return len(data) >= 2 and data[:2] == b"\x1f\x8b"
+    return decode_http_body(data, name=path, context="local XMLTV guide").decode("utf-8", errors="replace")
 
 
 def _filter_xmltv(raw_xml: str, channel_map: Dict[str, M3UChannel]) -> Tuple[str, Set[str]]:
