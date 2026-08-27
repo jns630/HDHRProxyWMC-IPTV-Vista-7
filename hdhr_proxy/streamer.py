@@ -6,7 +6,7 @@ import time
 import io
 import threading
 import re
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 
 from .m3u_parser import M3UParser
 
@@ -29,7 +29,7 @@ FFMPEG_INPUT_OPTIONS = [
 ]
 
 
-def _ffmpeg_reconnect_args(ffmpeg_path: str) -> list[str]:
+def _ffmpeg_reconnect_args(ffmpeg_path: str) -> List[str]:
     try:
         result = subprocess.run(
             [ffmpeg_path, "-hide_banner", "-h", "full"],
