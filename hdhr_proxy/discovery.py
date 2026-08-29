@@ -2190,7 +2190,7 @@ class DiscoveryServer:
                     break
                 else:
                     try:
-                        burst = burst_queue.get(timeout=0.5)
+                        burst = burst_queue.get(timeout=0.05)
                     except queue.Empty:
                         if (
                             self.force_vista_mode
@@ -2669,6 +2669,53 @@ class DiscoveryServer:
                     crc = (crc << 1) & 0xFFFFFFFF
         return crc
 
+    _http_persistent_option: Optional[List[str]] = None
+
+    def _http_persistent_args(self, ffmpeg_path: str) -> List[str]:
+        # Keep the HTTP/TLS connection to the HLS origin open across playlist,
+        # key, and segment fetches. Without this every ~6s segment boundary pays
+        # a fresh TLS handshake; on an HTTPS stitcher (Pluto) that latency stalls
+        # the encoder below real-time and WMC's buffer starves into choppy
+        # playback. The option was renamed across ffmpeg builds, so probe once
+        # and cache which name this binary accepts.
+        cached = DiscoveryServer._http_persistent_option
+        if cached is None:
+            try:
+                result = subprocess.run(
+                    [ffmpeg_path, "-hide_banner", "-h", "full"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=10,
+                )
+                help_text = (
+                    result.stdout.decode("utf-8", errors="replace")
+                    if result.stdout
+                    else ""
+                ) + (
+                    result.stderr.decode("utf-8", errors="replace")
+                    if result.stderr
+                    else ""
+                )
+            except Exception:
+                help_text = ""
+            # -multiple_requests only ever appears in the help under the HTTP
+            # *protocol* AVOptions section, where it is NOT a valid standalone
+            # input option -- passing "-multiple_requests 1" before "-i" makes
+            # ffmpeg abort with "Option multiple_requests not found." and the
+            # stream dies at 0 bytes. The option we want is the hls demuxer's
+            # -http_persistent, which defaults to true in modern builds and is
+            # uniquely identified in the help by the sibling "-http_multiple"
+            # line. Prefer that; fall back to -http_persistent on older builds;
+            # never emit -multiple_requests.
+            if "http_multiple" in help_text:
+                cached = ["-http_persistent", "1"]
+            elif "http_persistent" in help_text:
+                cached = ["-http_persistent", "1"]
+            else:
+                cached = []
+            DiscoveryServer._http_persistent_option = cached
+        return list(cached)
+
     def _ffmpeg_reconnect_args(self, ffmpeg_path: str) -> List[str]:
         try:
             result = subprocess.run(
@@ -2726,6 +2773,12 @@ class DiscoveryServer:
                     "-protocol_whitelist", "file,http,https,tcp,tls,crypto,udp,rtp",
                     "-allowed_extensions", "ALL",
                 ])
+                # Reuse the TLS/HTTP connection to the HLS origin across segment
+                # and key fetches. Without this ffmpeg opens a fresh connection
+                # per ~6s segment boundary; on an HTTPS stitcher (Pluto) the
+                # handshake latency stalls the encoder below real-time and WMC's
+                # buffer starves into choppy playback.
+                input_args.extend(self._http_persistent_args(self.ffmpeg_path))
             if self._needs_pluto_headers(source_url):
                 input_args.extend([
                     "-headers", "Accept: application/vnd.apple.mpegurl,application/x-mpegURL,*/*\r\nOrigin: https://pluto.tv\r\nReferer: https://pluto.tv/\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122 Safari/537.36\r\n",
@@ -2736,6 +2789,10 @@ class DiscoveryServer:
                 "-protocol_whitelist", "file,http,https,tcp,tls,crypto,udp,rtp",
                 "-allowed_extensions", "ALL",
             ])
+            # The local prepared Pluto master's segments still come from the
+            # remote HTTPS stitcher; keep the connection persistent so each
+            # segment boundary does not pay a fresh TLS handshake.
+            input_args.extend(self._http_persistent_args(self.ffmpeg_path))
 
         input_args.extend(["-i", source_url])
         video_map = self._local_hls_video_map(source_url)

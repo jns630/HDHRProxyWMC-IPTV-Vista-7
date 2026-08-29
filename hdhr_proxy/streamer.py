@@ -29,6 +29,54 @@ FFMPEG_INPUT_OPTIONS = [
 ]
 
 
+_HTTP_PERSISTENT_OPTION: Optional[List[str]] = None
+
+
+def _http_persistent_args(ffmpeg_path: str) -> List[str]:
+    # Keep the HTTP/TLS connection to the HLS origin open across playlist, key,
+    # and segment fetches. Without this every ~6s segment boundary pays a fresh
+    # TLS handshake; on an HTTPS stitcher (Pluto) that latency stalls the encoder
+    # below real-time and WMC's buffer starves into choppy playback. The option
+    # was renamed across ffmpeg builds, so probe once and cache which name this
+    # binary accepts.
+    global _HTTP_PERSISTENT_OPTION
+    if _HTTP_PERSISTENT_OPTION is None:
+        try:
+            result = subprocess.run(
+                [ffmpeg_path, "-hide_banner", "-h", "full"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+            )
+            help_text = (
+                result.stdout.decode("utf-8", errors="replace")
+                if result.stdout
+                else ""
+            ) + (
+                result.stderr.decode("utf-8", errors="replace")
+                if result.stderr
+                else ""
+            )
+        except Exception:
+            help_text = ""
+        # -multiple_requests only ever appears in the help under the HTTP
+        # *protocol* AVOptions section, where it is NOT a valid standalone
+        # input option -- passing "-multiple_requests 1" before "-i" makes
+        # ffmpeg abort with "Option multiple_requests not found." and the
+        # stream dies at 0 bytes. The option we want is the hls demuxer's
+        # -http_persistent, which defaults to true in modern builds and is
+        # uniquely identified in the help by the sibling "-http_multiple"
+        # line. Prefer that; fall back to -http_persistent on older builds;
+        # never emit -multiple_requests.
+        if "http_multiple" in help_text:
+            _HTTP_PERSISTENT_OPTION = ["-http_persistent", "1"]
+        elif "http_persistent" in help_text:
+            _HTTP_PERSISTENT_OPTION = ["-http_persistent", "1"]
+        else:
+            _HTTP_PERSISTENT_OPTION = []
+    return list(_HTTP_PERSISTENT_OPTION)
+
+
 def _ffmpeg_reconnect_args(ffmpeg_path: str) -> List[str]:
     try:
         result = subprocess.run(
@@ -285,6 +333,11 @@ def ffmpeg_transcode_stream(
         cmd.extend([
             "-headers", "Accept: application/vnd.apple.mpegurl,application/x-mpegURL,*/*\r\nOrigin: https://pluto.tv\r\nReferer: https://pluto.tv/\r\n",
         ])
+    if use_hls_profile:
+        # Keep the HTTP/TLS connection to the HLS origin open across playlist,
+        # key, and segment fetches so each ~6s segment boundary does not pay a
+        # fresh TLS handshake (see _http_persistent_args).
+        cmd.extend(_http_persistent_args(ffmpeg_path))
     cmd.extend([
         "-i", source_url,
         "-map", "0:v:0?",
