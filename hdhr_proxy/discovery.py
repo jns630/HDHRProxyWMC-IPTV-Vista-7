@@ -107,6 +107,50 @@ FFMPEG_ANALYZE_US = "5000000"
 FFMPEG_PROBE_BYTES = "5000000"
 FFMPEG_COPY_ANALYZE_US = "1500000"
 FFMPEG_COPY_PROBE_BYTES = "2000000"
+FFMPEG_COPY_PROBE_BYTES = "2000000"
+
+DEVICE_ID_CHECKSUM_TABLE = (0xA, 0x5, 0xF, 0x6, 0x7, 0xC, 0x1, 0xB, 0x9, 0x2, 0x8, 0xD, 0x4, 0x3, 0xE, 0x0)
+
+
+def _mpegts_burst_has_pes_start(burst: bytes) -> bool:
+    """Return True when a raw mpegts burst carries a PES packet start.
+
+    Null padding (PID 0x1FFF), PAT (PID 0x0000), and PSI sections never
+    match: PES packets begin with the 3-byte start code 00 00 01 followed by
+    a stream id, while sections begin with a table id. During an upstream
+    stall ffmpeg keeps emitting tables and null padding at the CBR mux rate,
+    so PES starts are the reliable signal that real video/audio is still
+    being produced for WMC's recording.
+    """
+    offset = 0
+    end = len(burst)
+    while offset + TS_PACKET_SIZE <= end:
+        if burst[offset] != 0x47:
+            offset += 1
+            continue
+        pid = ((burst[offset + 1] & 0x1F) << 8) | burst[offset + 2]
+        if (
+            pid not in (0x0000, 0x1FFF)
+            and (burst[offset + 1] & 0x40)  # payload_unit_start_indicator
+        ):
+            payload = burst[offset + 4 : offset + TS_PACKET_SIZE]
+            if burst[offset + 3] & 0x20:  # adaptation field present
+                payload = payload[1 + payload[0] :]
+            if len(payload) >= 3 and payload[0] == 0x00 and payload[1] == 0x00 and payload[2] == 0x01:
+                return True
+        offset += TS_PACKET_SIZE
+    return False
+# WMC records through the RTP/UDP tuner targets, which are fed by ffmpeg's
+# CBR mpegts muxer. When the upstream source stalls (slow HLS stitcher,
+# dropped origin connection, reconnect backoff), the muxer does NOT stop:
+# it keeps emitting PAT/PMT/PCR tables plus null-packet padding at the full
+# mux rate, so the UDP bridge queue never drains and WMC records minutes of
+# black video. Real video/audio only flows when MPEG-TS packets carry PES
+# packet starts, so the bridge watches for those to detect a stall and
+# restart the stream (fresh source session) instead of padding forever.
+FFMPEG_CONTENT_STALL_SECONDS = 8.0
+FFMPEG_FIRST_CONTENT_TIMEOUT_SECONDS = 12.0
+TS_PACKET_SIZE = 188
 
 DEVICE_ID_CHECKSUM_TABLE = (0xA, 0x5, 0xF, 0x6, 0x7, 0xC, 0x1, 0xB, 0x9, 0x2, 0x8, 0xD, 0x4, 0x3, 0xE, 0x0)
 
@@ -2183,7 +2227,39 @@ class DiscoveryServer:
             rtp_timestamp = int(time.time() * 90000) & 0xFFFFFFFF
             rtp_ssrc = zlib.crc32(b"HDHR" + rtp_seed) & 0xFFFFFFFF
             last_burst_at = time.monotonic()
+            # Content-starvation watchdog state (see FFMPEG_CONTENT_STALL_SECONDS).
+            last_content_at: Optional[float] = None
+            content_watchdog_started_at = started_at
             while not stop_event.is_set():
+                if not input_finished and proc.poll() is None:
+                    if last_content_at is None:
+                        starved_for = time.monotonic() - content_watchdog_started_at
+                        starved_limit = FFMPEG_FIRST_CONTENT_TIMEOUT_SECONDS
+                    else:
+                        starved_for = time.monotonic() - last_content_at
+                        starved_limit = FFMPEG_CONTENT_STALL_SECONDS
+                    if starved_for >= starved_limit:
+                        message = (
+                            f"FFmpeg produced no video/audio PES for tuner{tuner_idx} "
+                            f"for {starved_for:.1f}s (upstream stall, only null padding "
+                            "at the CBR mux rate); restarting active stream\n"
+                        )
+                        try:
+                            log_file.write(
+                                (
+                                    f"\n{time.strftime('%Y-%m-%d %H:%M:%S')} {message}"
+                                ).encode("utf-8", errors="replace")
+                            )
+                        except Exception:
+                            pass
+                        logger.warning(
+                            "FFmpeg produced no video/audio PES for tuner%s for %.1fs; "
+                            "restarting stream to recover from black recording",
+                            tuner_idx,
+                            starved_for,
+                        )
+                        proc.terminate()
+                        break
                 if prebuffered:
                     burst = prebuffered.pop(0)
                 elif input_finished:
@@ -2217,6 +2293,8 @@ class DiscoveryServer:
                     input_finished = True
                     break
                 last_burst_at = time.monotonic()
+                if _mpegts_burst_has_pes_start(burst):
+                    last_content_at = time.monotonic()
                 now = time.perf_counter()
                 if not pace_each_datagram and next_send > now:
                     delay = next_send - now
