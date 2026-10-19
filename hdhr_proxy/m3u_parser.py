@@ -64,7 +64,7 @@ class M3UParser:
             logger.error("M3U playlist fetch failed (%s) for URL: %s", exc.reason, url)
             raise
         raw = decode_http_body(data, headers=headers, name=url, context="remote M3U playlist").decode(
-            "utf-8", errors="replace"
+            "utf-8-sig", errors="replace"
         )
         master_channel = cls._hls_master_as_channel(raw, url)
         if master_channel:
@@ -74,8 +74,11 @@ class M3UParser:
     @classmethod
     def parse_file(cls, path: str, hls_base_url: Optional[str] = None) -> List[M3UChannel]:
         logger.info(f"Reading M3U playlist from file: {path}")
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            raw = f.read()
+        with open(path, "rb") as f:
+            data = f.read()
+        raw = decode_http_body(data, name=path, context="local M3U playlist").decode(
+            "utf-8-sig", errors="replace"
+        )
         abs_path = os.path.abspath(path)
         source = hls_base_url or abs_path
         master_channel = cls._hls_master_as_channel(raw, source, local_path=abs_path)

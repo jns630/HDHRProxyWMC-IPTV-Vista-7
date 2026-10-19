@@ -28,6 +28,7 @@ from .m3u_parser import M3UParser
 
 logger = logging.getLogger(__name__)
 CONTROL_TRACE_PATH = os.path.abspath("hdhr_control_trace.log")
+TUNER_LOG_MAX_BYTES = 5 * 1024 * 1024
 _WINMM = ctypes.WinDLL("winmm") if os.name == "nt" else None
 
 SSDP_ADDR = "239.255.255.250"
@@ -287,6 +288,24 @@ def _is_ignorable_udp_error(exc: OSError) -> bool:
     return getattr(exc, "winerror", None) == WSAECONNRESET or getattr(exc, "errno", None) == WSAECONNRESET
 
 
+def _open_tuner_log(path: str):
+    """Open a tuner log in append mode, rotating it first when it grows large.
+
+    ffmpeg runs for hours, so an unbounded append log can reach tens of
+    megabytes. Keep the previous run in ``*.log.1`` and start a fresh file.
+    """
+    try:
+        if os.path.getsize(path) > TUNER_LOG_MAX_BYTES:
+            try:
+                os.replace(path, path + ".1")
+            except OSError:
+                with open(path, "wb"):
+                    pass
+    except OSError:
+        pass
+    return open(path, "ab", buffering=0)
+
+
 def _set_timer_resolution(enable: bool):
     if not _WINMM:
         return
@@ -343,6 +362,8 @@ class DiscoveryServer:
         self._lineup_scan_map = "us-bcast"
         self._lineup_scan_started_at = 0.0
         self._hls_variant_cache: Dict[str, Tuple[str, float]] = {}
+        self._ffmpeg_help_cache: Dict[str, str] = {}
+        self._ffmpeg_reconnect_cache: Dict[str, List[str]] = {}
         self._prepared_input_cache: Dict[str, Tuple[str, float]] = {}
         self._channel_relay_server = None
         self._channel_relay_urls: Dict[str, Tuple[str, float]] = {}
@@ -400,6 +421,27 @@ class DiscoveryServer:
         if not self._udp_discovery_bound.wait(timeout):
             return False
         return self._tcp_control_bound.wait(max(0.0, deadline - time.monotonic()))
+
+    def stop(self):
+        """Stop listeners, tuner processes, and local relay servers."""
+        self.stop_event.set()
+        with self._state_lock:
+            for tuner_idx in list(self._tuner_state):
+                self._stop_tuner_process_locked(self._tuner_state[tuner_idx])
+        for attr in ("_channel_relay_server", "_vista_hls_relay_server"):
+            server = getattr(self, attr, None)
+            if not server:
+                continue
+            setattr(self, attr, None)
+            try:
+                server.shutdown()
+            except Exception:
+                pass
+            try:
+                server.server_close()
+            except Exception:
+                pass
+        logger.info("Discovery server stopped")
 
     def _make_ssdp_response(self, st: str) -> bytes:
         os_ver = platform.platform()
@@ -1350,7 +1392,7 @@ class DiscoveryServer:
                 logger.warning("Unsupported HDHR target %s", target)
                 return
             log_path = os.path.abspath(f"ffmpeg_tuner{tuner_idx}.log")
-            log_file = open(log_path, "ab", buffering=0)
+            log_file = _open_tuner_log(log_path)
             log_file.write((f"\n\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} target={stream_target} ffmpeg_target={ffmpeg_target} source={source_url} ===\n").encode("utf-8"))
             log_file.write((f"Python UDP bridge: {udp_addr[0]}:{udp_addr[1]} @ {self._transport_bps()} bps\n").encode("utf-8"))
             log_file.write((" ".join(cmd) + "\n").encode("utf-8", errors="replace"))
@@ -1825,11 +1867,13 @@ class DiscoveryServer:
                 raw = resp.read(512 * 1024).decode("utf-8", errors="replace")
         except Exception as exc:
             logger.debug("Unable to inspect HLS source %s: %s", source_url, exc)
+            self._hls_variant_cache[source_url] = (source_url, now + 60)
             return source_url
 
         variants = M3UParser._hls_variant_uris(raw)
         selected = M3UParser._select_hls_variant(variants)
         if not selected:
+            self._hls_variant_cache[source_url] = (source_url, now + 300)
             return source_url
 
         playback_url = urllib.parse.urljoin(base_url, selected)
@@ -1838,6 +1882,7 @@ class DiscoveryServer:
             self._hls_variant_cache[source_url] = (source_url, now + 300)
             return source_url
         if self._should_keep_original_hls_url(source_url, playback_url):
+            self._hls_variant_cache[source_url] = (source_url, now + 300)
             return source_url
         self._hls_variant_cache[source_url] = (playback_url, now + 300)
         logger.info("Using HLS media variant for playback: %s", playback_url)
@@ -2749,6 +2794,35 @@ class DiscoveryServer:
 
     _http_persistent_option: Optional[List[str]] = None
 
+    @staticmethod
+    def _decode_ffmpeg_help(value) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="replace")
+        return str(value)
+
+    def _ffmpeg_help_text(self, ffmpeg_path: str) -> str:
+        cached = self._ffmpeg_help_cache.get(ffmpeg_path)
+        if cached is not None:
+            return cached
+        try:
+            result = subprocess.run(
+                [ffmpeg_path, "-hide_banner", "-h", "full"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10,
+            )
+            help_text = (
+                self._decode_ffmpeg_help(result.stdout)
+                + "\n"
+                + self._decode_ffmpeg_help(result.stderr)
+            )
+        except Exception:
+            help_text = ""
+        self._ffmpeg_help_cache[ffmpeg_path] = help_text
+        return help_text
+
     def _http_persistent_args(self, ffmpeg_path: str) -> List[str]:
         # Keep the HTTP/TLS connection to the HLS origin open across playlist,
         # key, and segment fetches. Without this every ~6s segment boundary pays
@@ -2758,24 +2832,7 @@ class DiscoveryServer:
         # and cache which name this binary accepts.
         cached = DiscoveryServer._http_persistent_option
         if cached is None:
-            try:
-                result = subprocess.run(
-                    [ffmpeg_path, "-hide_banner", "-h", "full"],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    timeout=10,
-                )
-                help_text = (
-                    result.stdout.decode("utf-8", errors="replace")
-                    if result.stdout
-                    else ""
-                ) + (
-                    result.stderr.decode("utf-8", errors="replace")
-                    if result.stderr
-                    else ""
-                )
-            except Exception:
-                help_text = ""
+            help_text = self._ffmpeg_help_text(ffmpeg_path)
             # -multiple_requests only ever appears in the help under the HTTP
             # *protocol* AVOptions section, where it is NOT a valid standalone
             # input option -- passing "-multiple_requests 1" before "-i" makes
@@ -2785,9 +2842,7 @@ class DiscoveryServer:
             # uniquely identified in the help by the sibling "-http_multiple"
             # line. Prefer that; fall back to -http_persistent on older builds;
             # never emit -multiple_requests.
-            if "http_multiple" in help_text:
-                cached = ["-http_persistent", "1"]
-            elif "http_persistent" in help_text:
+            if "http_multiple" in help_text or "http_persistent" in help_text:
                 cached = ["-http_persistent", "1"]
             else:
                 cached = []
@@ -2795,28 +2850,24 @@ class DiscoveryServer:
         return list(cached)
 
     def _ffmpeg_reconnect_args(self, ffmpeg_path: str) -> List[str]:
-        try:
-            result = subprocess.run(
-                [ffmpeg_path, "-hide_banner", "-h", "full"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                check=False,
-            )
-        except Exception:
-            return ["-reconnect_at_eof", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2"]
+        cached = self._ffmpeg_reconnect_cache.get(ffmpeg_path)
+        if cached is not None:
+            return list(cached)
 
-        help_text = (result.stdout or "") + "\n" + (result.stderr or "")
+        help_text = self._ffmpeg_help_text(ffmpeg_path)
         if "reconnect_on_network_error" in help_text or "reconnect_on_http_error" in help_text:
-            return [
+            options = [
                 "-reconnect_at_eof", "1",
                 "-reconnect_streamed", "1",
                 "-reconnect_delay_max", "2",
                 "-reconnect_on_network_error", "1",
             ]
-        if "reconnect" in help_text:
-            return ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2"]
-        return ["-reconnect_at_eof", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2"]
+        elif "reconnect" in help_text:
+            options = ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2"]
+        else:
+            options = ["-reconnect_at_eof", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2"]
+        self._ffmpeg_reconnect_cache[ffmpeg_path] = options
+        return list(options)
 
     def _build_udp_ffmpeg_cmd(self, source_url: str, rf: Optional[Dict] = None) -> List[str]:
         service_id = int(rf.get("program", ATSC_PROGRAM_NUMBER)) if rf else ATSC_PROGRAM_NUMBER
@@ -2838,11 +2889,12 @@ class DiscoveryServer:
         ]
         if self._is_network_media_source(source_url):
             input_args.extend(["-rw_timeout", "15000000"])
-            input_args.extend(self._ffmpeg_reconnect_args(self.ffmpeg_path))
+            reconnect_args = self._ffmpeg_reconnect_args(self.ffmpeg_path)
+            input_args.extend(reconnect_args)
             input_args.extend(["-user_agent", "VLC/3.0.20 LibVLC/3.0.20"])
             parsed = urllib.parse.urlparse(source_url or "")
             if parsed.path.lower().endswith((".m3u8", ".m3u")):
-                if "reconnect_on_network_error" in self._ffmpeg_reconnect_args(self.ffmpeg_path):
+                if "reconnect_on_network_error" in reconnect_args:
                     input_args.extend([
                         "-reconnect_on_http_error", "429,500,502,503,504",
                     ])
@@ -3042,7 +3094,11 @@ class DiscoveryServer:
 
         # Search common relative layouts next to the executable/cwd so the
         # proxy stays portable without machine-specific absolute paths.
-        search_roots = [os.getcwd(), os.path.dirname(os.path.abspath(sys.executable))]
+        search_roots = [
+            os.getcwd(),
+            os.path.dirname(os.path.abspath(sys.executable)),
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        ]
         for search_root in search_roots:
             candidates = [
                 os.path.join(search_root, "ffmpeg.exe"),

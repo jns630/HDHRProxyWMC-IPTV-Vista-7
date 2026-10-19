@@ -29,7 +29,45 @@ FFMPEG_INPUT_OPTIONS = [
 ]
 
 
-_HTTP_PERSISTENT_OPTION: Optional[List[str]] = None
+HLS_RESOLUTION_TTL_SECONDS = 300.0
+_HLS_RESOLUTION_CACHE: Dict[str, tuple] = {}
+_HTTP_PERSISTENT_OPTIONS: Dict[str, List[str]] = {}
+_FFMPEG_RECONNECT_OPTIONS: Dict[str, List[str]] = {}
+_FFMPEG_HELP_CACHE: Dict[str, str] = {}
+_FFMPEG_CAPS_LOCK = threading.Lock()
+
+
+def _decode_help(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def _ffmpeg_help_text(ffmpeg_path: str) -> str:
+    """Return (and cache) the full option help for one ffmpeg binary.
+
+    Probing ffmpeg costs a process spawn, and several call sites need the same
+    answer. Cache it both to avoid duplicate work per tune and to keep option
+    detection consistent for the lifetime of the process.
+    """
+    with _FFMPEG_CAPS_LOCK:
+        if ffmpeg_path in _FFMPEG_HELP_CACHE:
+            return _FFMPEG_HELP_CACHE[ffmpeg_path]
+    try:
+        result = subprocess.run(
+            [ffmpeg_path, "-hide_banner", "-h", "full"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+        )
+        help_text = _decode_help(result.stdout) + "\n" + _decode_help(result.stderr)
+    except Exception:
+        help_text = ""
+    with _FFMPEG_CAPS_LOCK:
+        _FFMPEG_HELP_CACHE[ffmpeg_path] = help_text
+    return help_text
 
 
 def _http_persistent_args(ffmpeg_path: str) -> List[str]:
@@ -39,68 +77,48 @@ def _http_persistent_args(ffmpeg_path: str) -> List[str]:
     # below real-time and WMC's buffer starves into choppy playback. The option
     # was renamed across ffmpeg builds, so probe once and cache which name this
     # binary accepts.
-    global _HTTP_PERSISTENT_OPTION
-    if _HTTP_PERSISTENT_OPTION is None:
-        try:
-            result = subprocess.run(
-                [ffmpeg_path, "-hide_banner", "-h", "full"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=10,
-            )
-            help_text = (
-                result.stdout.decode("utf-8", errors="replace")
-                if result.stdout
-                else ""
-            ) + (
-                result.stderr.decode("utf-8", errors="replace")
-                if result.stderr
-                else ""
-            )
-        except Exception:
-            help_text = ""
-        # -multiple_requests only ever appears in the help under the HTTP
-        # *protocol* AVOptions section, where it is NOT a valid standalone
-        # input option -- passing "-multiple_requests 1" before "-i" makes
-        # ffmpeg abort with "Option multiple_requests not found." and the
-        # stream dies at 0 bytes. The option we want is the hls demuxer's
-        # -http_persistent, which defaults to true in modern builds and is
-        # uniquely identified in the help by the sibling "-http_multiple"
-        # line. Prefer that; fall back to -http_persistent on older builds;
-        # never emit -multiple_requests.
-        if "http_multiple" in help_text:
-            _HTTP_PERSISTENT_OPTION = ["-http_persistent", "1"]
-        elif "http_persistent" in help_text:
-            _HTTP_PERSISTENT_OPTION = ["-http_persistent", "1"]
-        else:
-            _HTTP_PERSISTENT_OPTION = []
-    return list(_HTTP_PERSISTENT_OPTION)
+    with _FFMPEG_CAPS_LOCK:
+        if ffmpeg_path in _HTTP_PERSISTENT_OPTIONS:
+            return list(_HTTP_PERSISTENT_OPTIONS[ffmpeg_path])
+    help_text = _ffmpeg_help_text(ffmpeg_path)
+    # -multiple_requests only ever appears in the help under the HTTP
+    # *protocol* AVOptions section, where it is NOT a valid standalone
+    # input option -- passing "-multiple_requests 1" before "-i" makes
+    # ffmpeg abort with "Option multiple_requests not found." and the
+    # stream dies at 0 bytes. The option we want is the hls demuxer's
+    # -http_persistent, which defaults to true in modern builds and is
+    # uniquely identified in the help by the sibling "-http_multiple"
+    # line. Prefer that; fall back to -http_persistent on older builds;
+    # never emit -multiple_requests.
+    if "http_multiple" in help_text or "http_persistent" in help_text:
+        options = ["-http_persistent", "1"]
+    else:
+        options = []
+    with _FFMPEG_CAPS_LOCK:
+        _HTTP_PERSISTENT_OPTIONS[ffmpeg_path] = list(options)
+    return list(options)
 
 
 def _ffmpeg_reconnect_args(ffmpeg_path: str) -> List[str]:
-    try:
-        result = subprocess.run(
-            [ffmpeg_path, "-hide_banner", "-h", "full"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-    except Exception:
-        return ["-reconnect_at_eof", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2"]
-
-    help_text = (result.stdout or "") + "\n" + (result.stderr or "")
+    with _FFMPEG_CAPS_LOCK:
+        if ffmpeg_path in _FFMPEG_RECONNECT_OPTIONS:
+            return list(_FFMPEG_RECONNECT_OPTIONS[ffmpeg_path])
+    help_text = _ffmpeg_help_text(ffmpeg_path)
     modern = "reconnect_on_network_error" in help_text or "reconnect_on_http_error" in help_text
     if modern:
-        return [
+        options = [
             "-reconnect_at_eof", "1",
             "-reconnect_streamed", "1",
             "-reconnect_delay_max", "2",
             "-reconnect_on_network_error", "1",
         ]
-    if "reconnect" in help_text:
-        return ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2"]
-    return ["-reconnect_at_eof", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2"]
+    elif "reconnect" in help_text:
+        options = ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2"]
+    else:
+        options = ["-reconnect_at_eof", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "2"]
+    with _FFMPEG_CAPS_LOCK:
+        _FFMPEG_RECONNECT_OPTIONS[ffmpeg_path] = list(options)
+    return list(options)
 
 
 def _needs_pluto_headers(source_url: str) -> bool:
@@ -149,6 +167,17 @@ def _resolve_hls_source_url(source_url: str) -> str:
     if not parsed.path.lower().endswith((".m3u8", ".m3u")):
         return source_url
 
+    now = time.monotonic()
+    with _FFMPEG_CAPS_LOCK:
+        cached = _HLS_RESOLUTION_CACHE.get(source_url)
+        if cached and cached[1] > now:
+            return cached[0]
+
+    def remember(resolved_url: str) -> str:
+        with _FFMPEG_CAPS_LOCK:
+            _HLS_RESOLUTION_CACHE[source_url] = (resolved_url, now + HLS_RESOLUTION_TTL_SECONDS)
+        return resolved_url
+
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122 Safari/537.36",
         "Accept": "application/vnd.apple.mpegurl,application/x-mpegURL,*/*",
@@ -163,16 +192,16 @@ def _resolve_hls_source_url(source_url: str) -> str:
             base_url = resp.geturl() or source_url
             raw = resp.read(512 * 1024).decode("utf-8", errors="replace")
     except Exception:
-        return source_url
+        return remember(source_url)
 
     variants = M3UParser._hls_variant_uris(raw)
     selected = M3UParser._select_hls_variant(variants)
     if not selected:
-        return source_url
+        return remember(source_url)
     playback_url = urllib.parse.urljoin(base_url, selected)
     if _should_keep_original_hls_url(source_url, playback_url):
-        return source_url
-    return playback_url
+        return remember(source_url)
+    return remember(playback_url)
 
 
 def _should_keep_original_hls_url(source_url: str, playback_url: str) -> bool:
@@ -453,7 +482,16 @@ class StreamSession:
             return
 
         source_url = ch.url
-        logger.info("Starting stream for channel %s: %s", self.channel_id, source_url)
+        logger.info(
+            "Starting %s for channel %s: %s",
+            "transcode" if self.ffmpeg_enabled else "direct stream",
+            self.channel_id,
+            source_url,
+        )
+
+        if not self.ffmpeg_enabled:
+            yield from direct_stream(source_url)
+            return
 
         yield from ffmpeg_transcode_stream(
             source_url,

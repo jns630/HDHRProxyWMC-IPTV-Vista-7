@@ -73,6 +73,18 @@ These fixes were added specifically to prevent wrong-channel playback, black scr
 
 ### Current working build
 
+- Configuration files are now validated at startup: missing/malformed JSON and out-of-range values produce a clear error and exit code `2` instead of a traceback.
+- Command-line options now override `config.json` only when explicitly supplied. Previously, argparse defaults for `--port`, `--tuners`, `--device-id`, `--device-name`, `--model`, `--listen-ip`, codec, and bitrate silently replaced the config file's values.
+- Restored Python 3.6 compatibility for ffmpeg capability detection (removed `subprocess.run(capture_output=..., text=...)`, which is Python 3.7+).
+- `--no-ffmpeg` now actually disables transcoding for HTTP `/stream/...` requests by using direct pass-through instead of starting ffmpeg.
+- HTTP `HEAD /stream/<channel>` now returns headers without starting ffmpeg or consuming a virtual tuner.
+- Concurrent requests for the same guide number are tracked separately, so ending one no longer clears another's tuner slot.
+- M3U/lineup/device XML values are escaped correctly, including quotes in `tvg-name` attributes.
+- ffmpeg option probing and HLS master resolution are cached, removing repeated ffmpeg process launches and network fetches when tuning.
+- Local playlists can be gzipped and may start with a UTF-8 BOM; XMLTV files may also start with a UTF-8 BOM.
+- The main log rotates at 10 MiB (3 backups), and per-tuner ffmpeg logs rotate at 5 MiB to keep runtime artifacts bounded.
+- Shutdown now stops tuner processes, local relay servers, discovery listeners, and the HTTP server cleanly.
+- Added a much larger stdlib test suite covering configuration, playlist/XMLTV parsing, HTTP endpoints, streaming helpers, discovery lifecycle, and CLI precedence.
 - Added richer Rovi/EPG123-style MXF guide metadata for WMC, including populated keyword groups, guide images, movie flags, series flags, news flags, genre hints, short descriptions, and fallback star metadata.
 - Improved Pluto-style XMLTV imports that only provide title, description, and artwork by inferring movie, series, and news guide categories from the active M3U lineup and channel names.
 - Fixed EPG123 MXF import compatibility by generating numeric guide image IDs instead of hex-style IDs.
@@ -221,6 +233,8 @@ python main.py --config config.json --tuners 4
 ```
 
 ## Configuration Reference
+
+Values in `config.json` are used unless the matching command-line option is explicitly supplied. Unknown keys are ignored with a warning, and invalid values stop startup with a clear message so a typo cannot silently change the lineup or bind address.
 
 | Key | Description | Default |
 | --- | --- | --- |

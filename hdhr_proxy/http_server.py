@@ -2,6 +2,7 @@ import json
 import logging
 import socket
 import threading
+import uuid
 import xml.sax.saxutils
 import hashlib
 import urllib.request
@@ -10,6 +11,7 @@ from socketserver import ThreadingMixIn
 from typing import Callable, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
 
+from . import __version__
 from .streamer import StreamSession
 from .xmltv import XMLTVData
 
@@ -24,6 +26,14 @@ class _ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
 
 def get_base_url(config) -> str:
     return getattr(config, "advertised_base_url", config.base_url)
+
+
+def _escape_xml(value) -> str:
+    return xml.sax.saxutils.escape(str(value))
+
+
+def _escape_xml_attr(value) -> str:
+    return xml.sax.saxutils.escape(str(value), {'"': "&quot;", "'": "&apos;"})
 
 
 def make_device_xml(
@@ -42,16 +52,16 @@ def make_device_xml(
   </specVersion>
   <device>
     <deviceType>urn:schemas-silicondust-com:device:hdhomerun:1</deviceType>
-    <friendlyName>{friendly_name}</friendlyName>
+    <friendlyName>{_escape_xml(friendly_name)}</friendlyName>
     <manufacturer>SiliconDust</manufacturer>
     <manufacturerURL>http://www.silicondust.com</manufacturerURL>
     <modelDescription>Virtual HDHomeRun</modelDescription>
-    <modelName>{model_number}</modelName>
-    <modelNumber>{model_number}</modelNumber>
+    <modelName>{_escape_xml(model_number)}</modelName>
+    <modelNumber>{_escape_xml(model_number)}</modelNumber>
     <modelURL>http://www.silicondust.com</modelURL>
-    <serialNumber>{device_id}</serialNumber>
-    <UDN>uuid:{device_id}</UDN>
-    <presentationURL>{base_url}</presentationURL>
+    <serialNumber>{_escape_xml(device_id)}</serialNumber>
+    <UDN>uuid:{_escape_xml(device_id)}</UDN>
+    <presentationURL>{_escape_xml(base_url)}</presentationURL>
   </device>
 </root>"""
 
@@ -70,13 +80,14 @@ class HDHRRequestHandler(BaseHTTPRequestHandler):
     stream_admission_lock = threading.Lock()
     logo_urls: Dict[str, str] = {}
     logo_cache: Dict[str, tuple] = {}
+    logo_cache_lock = threading.Lock()
 
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
         query = parse_qs(parsed.query)
 
-        logger.info("HTTP GET %s", path)
+        logger.debug("HTTP GET %s", path)
 
         handlers = {
             "/discover.json": self._handle_discover_json,
@@ -104,6 +115,7 @@ class HDHRRequestHandler(BaseHTTPRequestHandler):
     def _handle_root(self):
         body = json.dumps(
             {
+                "ProxyVersion": __version__,
                 "FriendlyName": self.config.device_name,
                 "ModelNumber": self.config.model_number,
                 "FirmwareVersion": self.config.firmware_version,
@@ -156,10 +168,10 @@ class HDHRRequestHandler(BaseHTTPRequestHandler):
             guide = item.get("GuideNumber", "")
             name = item.get("GuideName", guide)
             channel = self.channel_map.get(guide)
-            tvg_id = xml.sax.saxutils.escape(getattr(channel, "tvg_id", "") or "")
-            tvg_name = xml.sax.saxutils.escape(getattr(channel, "tvg_name", "") or name)
+            tvg_id = _escape_xml_attr(getattr(channel, "tvg_id", "") or "")
+            tvg_name = _escape_xml_attr(getattr(channel, "tvg_name", "") or name)
             rows.append(
-                f"#EXTINF:-1 channel-id=\"{guide}\" tvg-id=\"{tvg_id}\" tvg-name=\"{tvg_name}\" tvg-chno=\"{guide}\",{name}"
+                f"#EXTINF:-1 channel-id=\"{_escape_xml_attr(guide)}\" tvg-id=\"{tvg_id}\" tvg-name=\"{tvg_name}\" tvg-chno=\"{_escape_xml_attr(guide)}\",{name}"
             )
             rows.append(str(item.get("URL", "")))
         self._send_text("\r\n".join(rows) + "\r\n", "audio/x-mpegurl; charset=utf-8")
@@ -177,7 +189,8 @@ class HDHRRequestHandler(BaseHTTPRequestHandler):
             self.send_error(404, "Logo not found")
             return
 
-        cached = self.logo_cache.get(logo_id)
+        with self.logo_cache_lock:
+            cached = self.logo_cache.get(logo_id)
         if cached:
             content_type, data = cached
         else:
@@ -196,9 +209,10 @@ class HDHRRequestHandler(BaseHTTPRequestHandler):
                 logger.warning("Unable to fetch channel logo %s from %s: %s", logo_id, remote_url, exc)
                 self.send_error(502, "Unable to fetch logo")
                 return
-            if len(self.logo_cache) >= LOGO_CACHE_MAX_ENTRIES:
-                self.logo_cache.pop(next(iter(self.logo_cache)))
-            self.logo_cache[logo_id] = (content_type, data)
+            with self.logo_cache_lock:
+                if len(self.logo_cache) >= LOGO_CACHE_MAX_ENTRIES:
+                    self.logo_cache.pop(next(iter(self.logo_cache)))
+                self.logo_cache[logo_id] = (content_type, data)
 
         self.send_response(200)
         self.send_header("Content-Type", content_type)
@@ -237,25 +251,46 @@ class HDHRRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self._write_body(encoded)
 
+    def _send_stream_headers(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "video/mpeg")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
+        self.send_header("Connection", "close")
+        self.end_headers()
+
     def _handle_stream(self, channel_id: str, query: Dict):
         del query
         if channel_id not in self.channel_map:
             self.send_error(404, f"Channel {channel_id} not found")
             return
 
+        # A HEAD request must describe the stream without consuming a tuner or
+        # starting ffmpeg.
+        if getattr(self, "_suppress_body", False):
+            self._send_stream_headers()
+            return
+
         stop_event = threading.Event()
+        # Track every request with a unique token. Two clients can legitimately
+        # tune the same guide number; keying by channel alone would let the
+        # second request overwrite (and leak) the first one's stop event.
+        stream_token = "%s:%s" % (channel_id, uuid.uuid4().hex)
         with self.stream_admission_lock:
             active_count = len(self.active_streams)
             if active_count >= self.config.tuner_count:
                 logger.warning("Max tuners (%s) reached, rejecting %s", self.config.tuner_count, channel_id)
                 self.send_error(503, "All tuners in use")
                 return
-            self.active_streams[channel_id] = stop_event
+            self.active_streams[stream_token] = stop_event
 
-        if self.on_stream_start:
-            self.on_stream_start(channel_id)
-
+        response_started = False
         try:
+            if self.on_stream_start:
+                self.on_stream_start(channel_id)
+
             session = StreamSession(
                 channel_id=channel_id,
                 channel_map=self.channel_map,
@@ -267,14 +302,8 @@ class HDHRRequestHandler(BaseHTTPRequestHandler):
                 vista_mode=bool(getattr(self.config, "force_vista_mode", False)),
             )
 
-            self.send_response(200)
-            self.send_header("Content-Type", "video/mpeg")
-            self.send_header("Transfer-Encoding", "chunked")
-            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
-            self.send_header("Pragma", "no-cache")
-            self.send_header("Expires", "0")
-            self.send_header("Connection", "close")
-            self.end_headers()
+            self._send_stream_headers()
+            response_started = True
 
             self.connection.settimeout(1.0)
 
@@ -293,12 +322,16 @@ class HDHRRequestHandler(BaseHTTPRequestHandler):
             logger.info("Stream client stopped responding for channel %s", channel_id)
         except Exception as e:
             logger.error("Stream error for %s: %s", channel_id, e)
-            try:
-                self.send_error(500, f"Stream error: {e}")
-            except OSError:
-                pass
+            # The response line is already on the wire once streaming starts;
+            # sending another status line would corrupt the MPEG-TS response.
+            if not response_started:
+                try:
+                    self.send_error(500, f"Stream error: {e}")
+                except OSError:
+                    pass
         finally:
-            self.active_streams.pop(channel_id, None)
+            with self.stream_admission_lock:
+                self.active_streams.pop(stream_token, None)
             if self.on_stream_stop:
                 self.on_stream_stop(channel_id)
             logger.info("Stream ended for channel %s", channel_id)
@@ -383,6 +416,11 @@ class HDHRHTTPServer:
     def stop(self):
         if self._server:
             self._server.shutdown()
+            self._server.server_close()
+            self._server = None
+            if self._thread:
+                self._thread.join(timeout=2.0)
+                self._thread = None
             logger.info("HTTP server stopped")
 
 

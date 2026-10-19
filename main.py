@@ -22,8 +22,10 @@ import subprocess
 import sys
 import threading
 import time
+from logging.handlers import RotatingFileHandler
 
-from hdhr_proxy.config import Config
+from hdhr_proxy import __version__
+from hdhr_proxy.config import Config, ConfigError
 from hdhr_proxy.m3u_parser import M3UParser, build_lineup
 from hdhr_proxy.discovery import DiscoveryServer, normalize_device_id
 from hdhr_proxy.http_server import HDHRHTTPServer
@@ -50,6 +52,27 @@ from hdhr_proxy.vista_guide import (
 
 logger = logging.getLogger("main")
 _INSTANCE_GUARDS = []
+LOG_MAX_BYTES = 10 * 1024 * 1024
+LOG_BACKUP_COUNT = 3
+
+
+class _SafeRotatingFileHandler(RotatingFileHandler):
+    """Rotating handler that keeps working when another process holds the log.
+
+    On Windows a second proxy instance (or an editor) can keep the active log
+    file open, which makes the rename in ``doRollover`` fail. Reopen the stream
+    and keep appending instead of printing a logging traceback.
+    """
+
+    def doRollover(self):
+        try:
+            RotatingFileHandler.doRollover(self)
+        except OSError:
+            if self.stream is None:
+                self.stream = self._open()
+
+    def handleError(self, record):
+        pass
 
 
 def acquire_single_instance_guard(cfg: Config):
@@ -89,7 +112,12 @@ def configure_logging(log_dir: str = "."):
     try:
         os.makedirs(log_dir, exist_ok=True)
         log_path = os.path.join(log_dir, "hdhr_proxy_main.log")
-        file_handler = logging.FileHandler(log_path, encoding="utf-8")
+        file_handler = _SafeRotatingFileHandler(
+            log_path,
+            maxBytes=LOG_MAX_BYTES,
+            backupCount=LOG_BACKUP_COUNT,
+            encoding="utf-8",
+        )
         file_handler.setFormatter(formatter)
         root.addHandler(file_handler)
     except OSError:
@@ -335,7 +363,7 @@ def run_proxy(cfg: Config):
     cfg.lineup_source = "Antenna"
     configure_windows_hdhr_sources(cfg)
 
-    logger.info("=== Virtual HDHomerun Proxy ===")
+    logger.info("=== Virtual HDHomerun Proxy %s ===", __version__)
     logger.info(f"Device ID: {cfg.device_id}")
     logger.info(f"Model: {cfg.model_number}")
     logger.info(f"Tuners: {cfg.tuner_count}")
@@ -507,7 +535,7 @@ def run_proxy(cfg: Config):
             "HDHR discovery/control listener failed to bind. "
             "Run repair_hdhr_port.ps1 as Administrator, then restart the proxy."
         )
-        stop_event.set()
+        discovery.stop()
         http_server.stop()
         return
 
@@ -519,6 +547,7 @@ def run_proxy(cfg: Config):
     def handle_signal(sig, frame):
         logger.info("Shutdown signal received...")
         stop_event.set()
+        discovery.stop()
         http_server.stop()
         shutdown_event.set()
 
@@ -530,6 +559,9 @@ def run_proxy(cfg: Config):
     except KeyboardInterrupt:
         pass
 
+    stop_event.set()
+    discovery.stop()
+    http_server.stop()
     logger.info("Proxy stopped.")
 
 
@@ -549,6 +581,12 @@ Examples:
         """,
     )
 
+    parser.add_argument(
+        "--version",
+        action="version",
+        version="HDHRProxyWMC-IPTV %s" % __version__,
+    )
+
     # Config source
     parser.add_argument("--config", help="Path to JSON config file")
 
@@ -557,8 +595,8 @@ Examples:
     parser.add_argument("--m3u-url", help="URL to remote M3U/M3U8 playlist")
     parser.add_argument("--xmltv-file", help="Path to local XMLTV guide file")
     parser.add_argument("--xmltv-url", help="URL to remote XMLTV guide file")
-    parser.add_argument("--mxf-file", default="guide.mxf", help="Output Windows Media Center MXF guide path")
-    parser.add_argument("--auto-match-mxf-file", default="HDHRProxyWMC_AutoMatch.generated.mxf", help="Output WMC auto-match MXF path")
+    parser.add_argument("--mxf-file", default=None, help="Output Windows Media Center MXF guide path (default: guide.mxf)")
+    parser.add_argument("--auto-match-mxf-file", default=None, help="Output WMC auto-match MXF path (default: HDHRProxyWMC_AutoMatch.generated.mxf)")
     parser.add_argument("--write-mxf", action="store_true", help="Generate a Windows Media Center MXF guide file")
     parser.add_argument(
         "--import-mxf",
@@ -577,21 +615,21 @@ Examples:
     )
 
     # Device settings
-    parser.add_argument("--device-id", default="104FFFFF", help="8-char hex Device ID")
-    parser.add_argument("--device-name", default="Virtual HDHR Proxy", help="Friendly name")
-    parser.add_argument("--model", default="HDHR4-2US", help="Model number")
-    parser.add_argument("--tuners", type=int, default=4, help="Number of virtual tuners")
+    parser.add_argument("--device-id", default=None, help="8-char hex Device ID (default: from config or 104FFFFF)")
+    parser.add_argument("--device-name", default=None, help="Friendly name (default: from config or Virtual HDHR Proxy)")
+    parser.add_argument("--model", default=None, help="Model number (default: from config or HDHR4-2US)")
+    parser.add_argument("--tuners", type=int, default=None, help="Number of virtual tuners (default: from config or 4)")
 
     # Network
-    parser.add_argument("--port", type=int, default=5004, help="HTTP server port")
-    parser.add_argument("--listen-ip", default="0.0.0.0", help="Bind address")
+    parser.add_argument("--port", type=int, default=None, help="HTTP server port (default: from config or 5004)")
+    parser.add_argument("--listen-ip", default=None, help="Bind address (default: from config or 0.0.0.0)")
 
     # Transcoding
     parser.add_argument("--ffmpeg", default=None, help="Path to ffmpeg (empty=disable)")
     parser.add_argument("--no-ffmpeg", action="store_true", help="Disable ffmpeg transcoding")
-    parser.add_argument("--output-codec", default="mpeg2video", help="ffmpeg output video codec")
-    parser.add_argument("--audio-codec", default="ac3", help="ffmpeg output audio codec")
-    parser.add_argument("--bitrate", default="4000k", help="ffmpeg output bitrate")
+    parser.add_argument("--output-codec", default=None, help="ffmpeg output video codec (default: from config or mpeg2video)")
+    parser.add_argument("--audio-codec", default=None, help="ffmpeg output audio codec (default: from config or ac3)")
+    parser.add_argument("--bitrate", default=None, help="ffmpeg output bitrate (default: from config or 4000k)")
     parser.add_argument("--vista", action="store_true", help="Force Vista-specific WMC codec behavior for client testing")
     parser.add_argument("--vista-subchannels", type=int, help="Vista scan test mode: fixed subchannels per RF, for example 20")
 
@@ -605,11 +643,14 @@ Examples:
 
     args = parser.parse_args()
 
-    # Build config
-    cfg = Config(args.config)
-    cfg.config_file = args.config
+    # Build config. Explicit CLI values override the file; omitted CLI options
+    # leave the config file's values (or defaults) intact.
+    try:
+        cfg = Config(args.config)
+    except ConfigError as exc:
+        logger.error("%s", exc)
+        sys.exit(2)
 
-    # Override with CLI args
     if args.m3u_file:
         cfg.m3u_file = os.path.abspath(os.path.expandvars(os.path.expanduser(args.m3u_file)))
         cfg.m3u_url = None
@@ -622,9 +663,9 @@ Examples:
         cfg.xmltv_file = args.xmltv_file
     if args.xmltv_url:
         cfg.xmltv_url = args.xmltv_url
-    if args.mxf_file:
+    if args.mxf_file is not None:
         cfg.mxf_file = args.mxf_file
-    if args.auto_match_mxf_file:
+    if args.auto_match_mxf_file is not None:
         cfg.auto_match_mxf_file = args.auto_match_mxf_file
     if args.write_mxf:
         cfg.write_mxf = True
@@ -641,33 +682,39 @@ Examples:
         cfg.import_auto_match_mxf = True
     if args.guide_only_lineup:
         cfg.guide_only_lineup = True
-    if args.port:
+    if args.port is not None:
         cfg.http_port = args.port
-    if args.listen_ip:
+    if args.listen_ip is not None:
         cfg.listen_ip = args.listen_ip
-    if args.device_id:
+    if args.device_id is not None:
         cfg.device_id = args.device_id
-    if args.device_name:
+    if args.device_name is not None:
         cfg.device_name = args.device_name
-    if args.model:
+    if args.model is not None:
         cfg.model_number = args.model
-    if args.tuners:
+    if args.tuners is not None:
         cfg.tuner_count = args.tuners
 
     if args.ffmpeg is not None:
         cfg.ffmpeg_path = args.ffmpeg
     if args.no_ffmpeg:
         cfg.ffmpeg_enabled = False
-    if args.output_codec:
+    if args.output_codec is not None:
         cfg.ffmpeg_output_codec = args.output_codec
-    if args.audio_codec:
+    if args.audio_codec is not None:
         cfg.ffmpeg_audio_codec = args.audio_codec
-    if args.bitrate:
+    if args.bitrate is not None:
         cfg.ffmpeg_bitrate = args.bitrate
     if args.vista:
         cfg.force_vista_mode = True
-    if args.vista_subchannels:
+    if args.vista_subchannels is not None:
         cfg.programs_per_physical = args.vista_subchannels
+
+    try:
+        cfg.validate()
+    except ConfigError as exc:
+        logger.error("Invalid configuration: %s", exc)
+        sys.exit(2)
 
     # Windows service commands
     if args.command:

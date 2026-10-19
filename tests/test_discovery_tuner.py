@@ -1,5 +1,6 @@
 import os
 import sys
+import tempfile
 import threading
 import unittest
 from unittest import mock
@@ -63,6 +64,29 @@ class DiscoveryListenerWaitTests(unittest.TestCase):
 
 
 class FfmpegReconnectCompatibilityTests(unittest.TestCase):
+    def test_resolves_bundled_ffmpeg_from_project_root(self):
+        server = DiscoveryServer(
+            device_id="104ABCDE",
+            base_url="http://127.0.0.1:5004",
+            tuner_count=1,
+        )
+
+        with tempfile.TemporaryDirectory() as project_root, tempfile.TemporaryDirectory() as cwd:
+            ffmpeg_path = os.path.join(project_root, "ffmpeg", "build", "bin", "ffmpeg.exe")
+            os.makedirs(os.path.dirname(ffmpeg_path))
+            with open(ffmpeg_path, "wb"):
+                pass
+
+            previous_cwd = os.getcwd()
+            os.chdir(cwd)
+            with mock.patch("hdhr_proxy.discovery.__file__", os.path.join(project_root, "hdhr_proxy", "discovery.py")), \
+                    mock.patch("hdhr_proxy.discovery.sys.executable", os.path.join(cwd, "python.exe")), \
+                    mock.patch("hdhr_proxy.discovery.shutil.which", return_value=None):
+                try:
+                    self.assertEqual(server._resolve_ffmpeg_path("ffmpeg"), ffmpeg_path)
+                finally:
+                    os.chdir(previous_cwd)
+
     def test_legacy_ffmpeg_uses_legacy_reconnect_flags(self):
         server = DiscoveryServer(
             device_id="104ABCDE",

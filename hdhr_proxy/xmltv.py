@@ -57,7 +57,7 @@ def _fetch_xmltv_url(url: str) -> str:
         logger.error("XMLTV guide fetch failed (%s) for URL: %s", exc.reason, url)
         raise
     return decode_http_body(data, headers=headers, name=url, context="remote XMLTV guide").decode(
-        "utf-8", errors="replace"
+        "utf-8-sig", errors="replace"
     )
 
 
@@ -65,7 +65,9 @@ def _read_xmltv_file(path: str) -> str:
     logger.info("Reading XMLTV guide from file: %s", path)
     with open(path, "rb") as f:
         data = f.read()
-    return decode_http_body(data, name=path, context="local XMLTV guide").decode("utf-8", errors="replace")
+    return decode_http_body(data, name=path, context="local XMLTV guide").decode(
+        "utf-8-sig", errors="replace"
+    )
 
 
 def _filter_xmltv(raw_xml: str, channel_map: Dict[str, M3UChannel]) -> Tuple[str, Set[str]]:
