@@ -25,6 +25,11 @@ from socketserver import ThreadingMixIn
 from typing import Callable, Dict, List, Optional, Tuple
 
 from .m3u_parser import M3UParser
+from .tuner_types import (
+    ATSC_FREQUENCIES,
+    ATSC_PROGRAM_NUMBER,
+    FrequencyPlan,
+)
 
 logger = logging.getLogger(__name__)
 CONTROL_TRACE_PATH = os.path.abspath("hdhr_control_trace.log")
@@ -83,15 +88,8 @@ HDHR_DEVICE_TYPE_WILDCARD = 0xFFFFFFFF
 HDHR_DEVICE_TYPE_TUNER = 0x00000001
 HDHR_DEVICE_ID_WILDCARD = 0xFFFFFFFF
 WSAECONNRESET = 10054
-ATSC_PROGRAM_NUMBER = 3
 
-US_BCAST_FREQUENCIES = {
-    **{ch: (57 + (ch - 2) * 6) * 1000000 for ch in range(2, 5)},
-    5: 79000000,
-    6: 85000000,
-    **{ch: (177 + (ch - 7) * 6) * 1000000 for ch in range(7, 14)},
-    **{ch: (473 + (ch - 14) * 6) * 1000000 for ch in range(14, 70)},
-}
+US_BCAST_FREQUENCIES = ATSC_FREQUENCIES
 
 SSDP_RESPONSE_TEMPLATE = """\
 HTTP/1.1 200 OK\r
@@ -338,6 +336,12 @@ class DiscoveryServer:
         audio_codec: str = "ac3",
         bitrate: str = "4000k",
         force_vista_mode: bool = False,
+        tuner_type: str = "atsc",
+        dvb_first_channel: int = 21,
+        dvb_last_channel: int = 69,
+        dvb_bandwidth: int = 8,
+        dvb_start_frequency: int = 474000000,
+        max_physical_channel: int = 59,
     ):
         self.device_id = device_id
         self.base_url = base_url
@@ -356,10 +360,19 @@ class DiscoveryServer:
         self.audio_codec = audio_codec
         self.bitrate = bitrate
         self.force_vista_mode = force_vista_mode
+        self.frequency_plan = FrequencyPlan(
+            tuner_type=tuner_type,
+            dvb_first_channel=dvb_first_channel,
+            dvb_last_channel=dvb_last_channel,
+            dvb_bandwidth=dvb_bandwidth,
+            dvb_start_frequency=dvb_start_frequency,
+            atsc_max_physical_channel=max_physical_channel,
+        )
+        self.tuner_type = self.frequency_plan.tuner_type
         self._reported_firmware_version = firmware_version
         self._upgrade_target_firmware_version = self._infer_upgrade_target_version()
         self._lineup_scan_active = False
-        self._lineup_scan_map = "us-bcast"
+        self._lineup_scan_map = self.frequency_plan.scan_map
         self._lineup_scan_started_at = 0.0
         self._hls_variant_cache: Dict[str, Tuple[str, float]] = {}
         self._ffmpeg_help_cache: Dict[str, str] = {}
@@ -381,7 +394,7 @@ class DiscoveryServer:
         self._tuner_state = {
             i: {
                 "channel": "none",
-                "channelmap": "us-bcast",
+                "channelmap": self.frequency_plan.channelmap,
                 "filter": "0x0000-0x1FFF",
                 "program": "none",
                 "target": "none",
@@ -722,12 +735,12 @@ class DiscoveryServer:
         if "/status" in name:
             rf = self._rf_channels[0] if self._rf_channels else None
             if rf:
-                return f"ch=auto:{rf['frequency']} lock=8vsb ss={rf['ss']} snq={rf['snq']} seq={rf['seq']} bps={rf['bps']} pps={rf['bps'] // 188}"
+                return f"ch=auto:{rf['frequency']} lock={self.frequency_plan.modulation} ss={rf['ss']} snq={rf['snq']} seq={rf['seq']} bps={rf['bps']} pps={rf['bps'] // 188}"
             return "ch=none lock=none ss=0 snq=0 seq=0 bps=0 pps=0"
         if "/streaminfo" in name:
             return self._format_streaminfo_for_physical(self._rf_channels[0]) if self._rf_channels else "none"
         if "/channelmap" in name:
-            return "us-bcast"
+            return self.frequency_plan.channelmap
         if "/channel" in name:
             rf = self._rf_channels[0] if self._rf_channels else None
             return f"auto:{rf['frequency']}" if rf else "none"
@@ -746,11 +759,11 @@ class DiscoveryServer:
             "/sys/model": firmware_model,
             "/sys/hwmodel": self.model_number,
             "/sys/version": self._reported_firmware_version,
-            "/sys/features": "channelmap: us-bcast\nmodulation: 8vsb qam64 qam256\nauto-modulation: auto auto6t auto8t",
+            "/sys/features": self.frequency_plan.features,
             "/sys/copyright": "HDHomeRun virtual tuner proxy",
             "/sys/debug": "VirtualHDHR: ok",
-            "/sys/dvbc_modulation": "8vsb",
-            "/sys/channelmap": "us-bcast",
+            "/sys/dvbc_modulation": self.frequency_plan.modulation,
+            "/sys/channelmap": self.frequency_plan.channelmap,
             "/sys/tuners": str(self.tuner_count),
             "/lineup/location": "Digital Antenna",
             "/lineup/location_url": f"{self.base_url}/lineup.json",
@@ -784,7 +797,7 @@ class DiscoveryServer:
         if name == "/lineup/location":
             return "Digital Antenna"
         if name == "/lineup/scan":
-            scan_map = (value or "us-bcast").strip()
+            scan_map = (value or self.frequency_plan.scan_map).strip()
             if scan_map.lower() in ("abort", "stop", "none"):
                 self._lineup_scan_active = False
                 self._lineup_scan_started_at = 0.0
@@ -794,7 +807,7 @@ class DiscoveryServer:
             self._lineup_scan_map = self._normalize_scan_map(scan_map)
             return ""
         if name == "/sys/channelmap":
-            return "us-bcast"
+            return self.frequency_plan.channelmap
         if name == "/sys/restart":
             return "none"
 
@@ -826,7 +839,7 @@ class DiscoveryServer:
                 self._refresh_tuner_status(tuner_idx)
                 return "none"
             if field == "channelmap":
-                value = "us-bcast"
+                value = self.frequency_plan.channelmap
             state[field] = value or "none"
             if field == "channel":
                 previous_rf = state.get("rf") or {}
@@ -940,9 +953,18 @@ class DiscoveryServer:
         for idx, (guide_number, channel) in enumerate(self.channel_map.items(), start=2):
             item = lineup_by_guide.get(guide_number, {})
             physical_channel = int(item.get("PhysicalChannel") or idx)
-            frequency = int(item.get("Frequency") or US_BCAST_FREQUENCIES.get(physical_channel, 57000000))
-            low_freq = int(item.get("LowFreq") or frequency - 3000000)
-            high_freq = int(item.get("HighFreq") or frequency + 3000000)
+            frequency = int(
+                item.get("Frequency")
+                or self.frequency_plan.frequency_for_physical_channel(physical_channel)
+            )
+            low_freq = int(
+                item.get("LowFreq")
+                or self.frequency_plan.low_frequency_for_physical_channel(physical_channel)
+            )
+            high_freq = int(
+                item.get("HighFreq")
+                or self.frequency_plan.high_frequency_for_physical_channel(physical_channel)
+            )
             guide = str(guide_number)
             guide_parts = guide.split(".", 1)
             major = str(item.get("VirtualMajor") or guide_parts[0] or physical_channel)
@@ -1061,19 +1083,85 @@ class DiscoveryServer:
         numbers = [int(n) for n in re.findall(r"\d+", hint or "")]
         if not numbers:
             return None, None
-        # Unknown scan frequencies should look like no lock. Reporting lock=8vsb with
-        # zero signal makes WMC create transient ghost services and then discard them.
-        return None, None
+        # ATSC scans cover the same physical range as the virtual lineup, so an
+        # unknown frequency there must look like no lock. DVB-T scanners use a
+        # regional channel list that can sit completely outside the virtual
+        # lineup, so fold those frequencies back onto a virtual RF instead.
+        if not self.frequency_plan.is_dvbt:
+            return None, None
+        physical = None
+        for number in numbers:
+            candidate = self.frequency_plan.physical_for_frequency(number)
+            if candidate is not None:
+                physical = candidate
+                break
+        if physical is None:
+            for number in numbers:
+                if self.frequency_plan.first_physical_channel <= number <= self.frequency_plan.last_physical_channel:
+                    physical = number
+                    break
+        if physical is None:
+            return None, None
+        return None, self._virtual_rf_for_scan_physical(physical)
+
+    def _virtual_rf_group_physicals(self) -> List[int]:
+        physicals: List[int] = []
+        for rf in self._rf_channels:
+            physical = int(rf.get("physical") or 0)
+            if physical and physical not in physicals:
+                physicals.append(physical)
+        return physicals
+
+    def _virtual_rf_for_scan_physical(self, physical: int) -> Optional[Dict]:
+        """Map a scanned DVB-T physical channel onto one virtual lineup RF.
+
+        The mapping is deterministic (a fixed offset fold) so that a later
+        playback tune of the same scanned frequency resolves to the same
+        virtual RF, even across proxy restarts.
+        """
+        physicals = self._virtual_rf_group_physicals()
+        if not physicals:
+            return None
+        offset = int(physical) - self.frequency_plan.first_physical_channel
+        if offset < 0:
+            offset = int(physical)
+        target = physicals[offset % len(physicals)]
+        for rf in self._rf_channels:
+            if int(rf.get("physical") or 0) == target:
+                return rf
+        return None
 
     def _looks_like_atsc_scan_probe(self, text: str, numbers: List[int]) -> bool:
         lowered = (text or "").lower()
         if "none" in lowered:
             return False
-        if "auto" in lowered or "us-bcast" in lowered or "8vsb" in lowered:
+        plan = self.frequency_plan
+        if "auto" in lowered or plan.channelmap.lower() in lowered or plan.modulation.lower() in lowered:
             return True
+        if plan.is_dvbt:
+            if "dvb" in lowered:
+                return True
+            return any(
+                plan.first_physical_channel <= n <= plan.last_physical_channel
+                or plan.start_frequency <= n <= plan.end_frequency
+                for n in numbers
+            )
         return any(2 <= n <= 69 or 54000000 <= n <= 806000000 for n in numbers)
 
     def _rf_from_scan_numbers(self, numbers: List[int], fallback: Dict) -> Tuple[int, int]:
+        plan = self.frequency_plan
+        if plan.is_dvbt:
+            for n in numbers:
+                physical = plan.physical_for_frequency(n)
+                if physical is not None:
+                    return physical, plan.frequency_for_physical_channel(physical)
+            for n in numbers:
+                if plan.first_physical_channel <= n <= plan.last_physical_channel:
+                    return n, plan.frequency_for_physical_channel(n)
+            return (
+                int(fallback.get("physical") or plan.first_physical_channel),
+                int(fallback.get("frequency") or plan.frequency_for_physical_channel(plan.first_physical_channel)),
+            )
         for n in numbers:
             if 54000000 <= n <= 806000000:
                 for physical, frequency in US_BCAST_FREQUENCIES.items():
@@ -1093,14 +1181,14 @@ class DiscoveryServer:
         state = self._tuner_state[tuner_idx]
         channel = state.get("channel") or "auto:virtual"
         rf = state.get("rf")
-        if state.get("channel_id") and rf:
+        if rf and (state.get("channel_id") or self._is_scan_like_tune(channel)):
             state["status"] = (
-                f"ch={channel} lock=8vsb ss={rf['ss']} snq={rf['snq']} "
+                f"ch={channel} lock={self.frequency_plan.modulation} ss={rf['ss']} snq={rf['snq']} "
                 f"seq={rf['seq']} bps={rf['bps']} pps={rf['bps'] // 188}"
             )
         elif state.get("target") not in (None, "", "none") and rf:
             state["status"] = (
-                f"ch={channel} lock=8vsb ss=90 snq=90 seq=100 "
+                f"ch={channel} lock={self.frequency_plan.modulation} ss=90 snq=90 seq=100 "
                 f"bps={rf['bps']} pps={rf['bps'] // 188} tuning=1"
             )
             state["streaminfo"] = self._format_streaminfo_for_physical(rf)
@@ -1186,13 +1274,16 @@ class DiscoveryServer:
     def _format_lineup_scan_xml(self) -> str:
         rows = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>', "<LineupUIResponse>", "<Command>IdentifyPrograms2</Command>"]
         for rf in self._rf_channels:
-            physical = int(rf.get("physical") or 2)
-            frequency = int(rf.get("frequency") or US_BCAST_FREQUENCIES.get(physical, 57000000))
+            physical = int(rf.get("physical") or self.frequency_plan.first_physical_channel)
+            frequency = int(
+                rf.get("frequency")
+                or self.frequency_plan.frequency_for_physical_channel(physical)
+            )
             guide_number = xml.sax.saxutils.escape(f"{rf['major']}.{rf['minor']}")
             guide_name = xml.sax.saxutils.escape(str(rf.get("name") or "VirtualHD"))
             rows.extend([
                 "<Program>",
-                "<Modulation>8vsb</Modulation>",
+                f"<Modulation>{xml.sax.saxutils.escape(self.frequency_plan.modulation)}</Modulation>",
                 f"<Frequency>{frequency}</Frequency>",
                 f"<TransportStreamID>0x{physical:04X}</TransportStreamID>",
                 f"<ProgramNumber>{int(rf.get('program') or ATSC_PROGRAM_NUMBER)}</ProgramNumber>",
@@ -1209,11 +1300,14 @@ class DiscoveryServer:
 
         lines = []
         for rf in self._rf_channels:
-            physical = int(rf.get("physical") or 2)
-            frequency = int(rf.get("frequency") or US_BCAST_FREQUENCIES.get(physical, 57000000))
-            channelmap = self._lineup_scan_map or "us-bcast"
+            physical = int(rf.get("physical") or self.frequency_plan.first_physical_channel)
+            frequency = int(
+                rf.get("frequency")
+                or self.frequency_plan.frequency_for_physical_channel(physical)
+            )
+            channelmap = self._lineup_scan_map or self.frequency_plan.channelmap
             scan_line = f"SCANNING: {frequency} ({channelmap}:{physical})"
-            lock_line = f"LOCK: 8vsb (ss={rf['ss']} snq={rf['snq']} seq={rf['seq']})"
+            lock_line = f"LOCK: {self.frequency_plan.modulation} (ss={rf['ss']} snq={rf['snq']} seq={rf['seq']})"
             tsid_line = f"TSID: 0x{physical:04X}"
             program_line = f"PROGRAM {rf['program']}: {rf['major']}.{rf['minor']} {rf['name']}"
             lines.extend([
@@ -1231,7 +1325,13 @@ class DiscoveryServer:
     def _normalize_scan_map(self, scan_map: str) -> str:
         value = (scan_map or "").strip().lower()
         if value in ("", "start", "scan", "auto", "antenna", "digital antenna"):
-            return "us-bcast"
+            return self.frequency_plan.scan_map
+        if self.frequency_plan.is_dvbt:
+            if value in ("dvb", "dvbt", "dvb-t", "dvbt2", "dvb-t2", "eu-bcast"):
+                return self.frequency_plan.scan_map
+            if value in ("cable", "digital cable"):
+                return "dvb-c"
+            return scan_map
         if value in ("cable", "digital cable"):
             return "us-cable"
         return scan_map
@@ -2009,7 +2109,11 @@ class DiscoveryServer:
 
     def _is_scan_like_tune(self, channel_value: object) -> bool:
         channel_text = str(channel_value or "").lower()
-        return "auto" in channel_text or "8vsb" in channel_text or "us-bcast" in channel_text
+        return (
+            "auto" in channel_text
+            or self.frequency_plan.modulation.lower() in channel_text
+            or self.frequency_plan.channelmap.lower() in channel_text
+        )
 
     def _representative_rf_for_filter(self, state: Dict) -> Optional[Dict]:
         av_matches, pmt_matches, requested_count = self._filter_match_candidates(state)
@@ -2558,7 +2662,10 @@ class DiscoveryServer:
         match = re.match(r"^(?:udp|rtp)://([0-9.]+):(\d+)", target)
         if not match:
             return
-        psip_sections = self._build_atsc_psip_sections(rf)
+        if self.frequency_plan.is_dvbt:
+            psip_sections = self._build_dvb_si_sections(rf)
+        else:
+            psip_sections = self._build_atsc_psip_sections(rf)
         continuity_by_pid: Dict[int, int] = {}
         is_rtp = target.lower().startswith("rtp://")
         addr = (match.group(1), int(match.group(2)))
@@ -2581,7 +2688,7 @@ class DiscoveryServer:
                             timestamp = (timestamp + 1500) & 0xFFFFFFFF
                     time.sleep(0.025 if warmup else 0.1)
         except OSError as e:
-            logger.debug(f"ATSC PSIP sender failed for {target}: {e}")
+            logger.debug(f"{self.frequency_plan.modulation} SI sender failed for {target}: {e}")
 
     def _wrap_rtp_mpegts(self, payload: bytes, sequence: int, timestamp: int, ssrc: int) -> bytes:
         header = bytes([
@@ -2608,6 +2715,77 @@ class DiscoveryServer:
         sections.append((0x1FFB, mgt_section))
         sections.extend((0x1FFB, section) for section in tvct_sections)
         return sections
+
+    def _build_dvb_si_sections(self, rf: Dict) -> List[Tuple[int, bytes]]:
+        """Build minimal DVB-T SI (PAT/PMT/SDT) for one virtual RF.
+
+        ATSC uses MGT/TVCT for channel discovery; DVB-T clients discover
+        services from the PAT/PMT and the SDT (PID 0x11).
+        """
+        rf_group = self._rf_group_for_physical(rf)
+        sections = [(0x0000, self._make_pat_section(rf_group))]
+        for item in rf_group:
+            sections.append((int(item.get("pmt_pid") or 0x31), self._make_pmt_section(item)))
+        for sdt_section in self._make_dvb_sdt_sections(rf_group):
+            sections.append((0x0011, sdt_section))
+        return sections
+
+    def _make_dvb_sdt_sections(self, rf_group: List[Dict]) -> List[bytes]:
+        entries = [self._make_dvb_sdt_service(rf) for rf in rf_group] or [b""]
+        # DVB PSI sections are limited to 1021 bytes, so split large RF groups
+        # into multiple SDT sections instead of overflowing section_length.
+        chunks = []
+        current = []
+        current_size = 0
+        for entry in entries:
+            if current and current_size + len(entry) > 1000:
+                chunks.append(current)
+                current = []
+                current_size = 0
+            current.append(entry)
+            current_size += len(entry)
+        if current:
+            chunks.append(current)
+        last_section_number = len(chunks) - 1
+        return [
+            self._make_dvb_sdt_section(rf_group, chunk, number, last_section_number)
+            for number, chunk in enumerate(chunks)
+        ]
+
+    def _make_dvb_sdt_service(self, rf: Dict) -> bytes:
+        service_id = int(rf.get("program") or ATSC_PROGRAM_NUMBER) & 0xFFFF
+        name = self._safe_channel_name(rf.get("name") or "VirtualHD")[:32].encode("utf-8")[:255]
+        provider = b"HDHRProxy"
+        service_descriptor = (
+            bytes([0x48, 3 + len(provider) + len(name), 0x01, len(provider)])
+            + provider
+            + bytes([len(name)])
+            + name
+        )
+        return (
+            service_id.to_bytes(2, "big")
+            + bytes([0xFC])  # EIT flags off
+            + (0x8000 | len(service_descriptor)).to_bytes(2, "big")
+            + service_descriptor
+        )
+
+    def _make_dvb_sdt_section(
+        self,
+        rf_group: List[Dict],
+        entries: List[bytes],
+        section_number: int = 0,
+        last_section_number: int = 0,
+    ) -> bytes:
+        first = rf_group[0] if rf_group else {}
+        transport_stream_id = int(first.get("physical") or 1) & 0xFFFF
+        body = (
+            transport_stream_id.to_bytes(2, "big")
+            + bytes([0xC1, section_number & 0xFF, last_section_number & 0xFF])
+            + (0x0001).to_bytes(2, "big")  # original_network_id
+            + bytes([0xFF])  # reserved_future_use
+            + b"".join(entries)
+        )
+        return self._make_psip_section(0x42, body)
 
     def _packetize_atsc_psip_sections(
         self,
@@ -3122,18 +3300,19 @@ class DiscoveryServer:
 
     def _firmware_model_name(self) -> str:
         model = (self.model_number or "").lower()
+        suffix = "dvbt" if self.frequency_plan.is_dvbt else "atsc"
         if "hdhr4" in model:
-            return "hdhomerun4_atsc"
+            return "hdhomerun4_" + suffix
         if "hdhr3" in model:
-            return "hdhomerun3_atsc"
-        return "hdhomerun4_atsc"
+            return "hdhomerun3_" + suffix
+        return "hdhomerun4_" + suffix
 
     def _infer_upgrade_target_version(self) -> str:
         firmware_model = self._firmware_model_name()
         match = re.search(r"_(\d{8})$", firmware_model)
         if match:
             return match.group(1)
-        if firmware_model == "hdhomerun4_atsc":
+        if firmware_model in ("hdhomerun4_atsc", "hdhomerun4_dvbt"):
             return "20150826"
         if firmware_model.startswith("hdhomerun3_"):
             return "20150406"

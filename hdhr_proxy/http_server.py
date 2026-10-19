@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlparse
 
 from . import __version__
 from .streamer import StreamSession
+from .tuner_types import DVBT, normalize_tuner_type
 from .xmltv import XMLTVData
 
 logger = logging.getLogger(__name__)
@@ -135,7 +136,11 @@ class HDHRRequestHandler(BaseHTTPRequestHandler):
             {
                 "FriendlyName": self.config.device_name,
                 "ModelNumber": self.config.model_number,
-                "FirmwareName": "hdhr4_linux",
+                "FirmwareName": (
+                    "hdhr4_dvbt"
+                    if normalize_tuner_type(getattr(self.config, "tuner_type", "atsc")) == DVBT
+                    else "hdhr4_linux"
+                ),
                 "FirmwareVersion": self.config.firmware_version,
                 "DeviceID": self.config.device_id,
                 "DeviceAuth": "virtual",

@@ -4,6 +4,7 @@
   "model_number": "HDHR4-2US",
   "firmware_version": "20140101",
   "tuner_count": 2,
+  "tuner_type": "atsc",
   "http_port": 5004,
   "listen_ip": "0.0.0.0",
   "m3u_file": "playlists/channels.m3u",

@@ -26,6 +26,7 @@ from logging.handlers import RotatingFileHandler
 
 from hdhr_proxy import __version__
 from hdhr_proxy.config import Config, ConfigError
+from hdhr_proxy.tuner_types import DVBT, normalize_tuner_type
 from hdhr_proxy.m3u_parser import M3UParser, build_lineup
 from hdhr_proxy.discovery import DiscoveryServer, normalize_device_id
 from hdhr_proxy.http_server import HDHRHTTPServer
@@ -197,9 +198,10 @@ def configure_windows_hdhr_sources(cfg: Config):
     except ImportError:
         return
 
+    plan = cfg.frequency_plan()
     source_type = "Digital Antenna"
     source = "Digital Antenna"
-    model = _registry_model_name(cfg.model_number)
+    model = _registry_model_name(cfg.model_number, cfg.tuner_type)
     subkey = r"SOFTWARE\Silicondust\HDHomeRun\Tuners"
     views = [0]
     if hasattr(winreg, "KEY_WOW64_32KEY"):
@@ -227,7 +229,7 @@ def configure_windows_hdhr_sources(cfg: Config):
                             winreg.SetValueEx(tuner_key, "BDAPIDFilter", 0, winreg.REG_SZ, "Enabled")
                             winreg.SetValueEx(tuner_key, "BDAVCTMode", 0, winreg.REG_SZ, "Normal")
                             winreg.SetValueEx(tuner_key, "ChannelMapping", 0, winreg.REG_SZ, "Native")
-                            winreg.SetValueEx(tuner_key, "Channelmap", 0, winreg.REG_SZ, "us-bcast")
+                            winreg.SetValueEx(tuner_key, "Channelmap", 0, winreg.REG_SZ, plan.channelmap)
                             winreg.SetValueEx(tuner_key, "DeviceID", 0, winreg.REG_SZ, cfg.device_id)
                 if root == winreg.HKEY_LOCAL_MACHINE:
                     wrote_hklm = True
@@ -236,16 +238,23 @@ def configure_windows_hdhr_sources(cfg: Config):
                 errors.append(str(e))
 
     if wrote_hklm:
-        logger.info("Windows HDHomeRun HKLM tuner source defaults set to Digital Antenna.")
+        logger.info(
+            "Windows HDHomeRun HKLM tuner source defaults set to Digital Antenna (%s).",
+            cfg.tuner_type,
+        )
     elif wrote_any:
-        reg_path = write_windows_hdhr_registry_file(cfg, model, source_type, source)
+        reg_path = write_windows_hdhr_registry_file(
+            cfg, model, source_type, source, channelmap=plan.channelmap
+        )
         logger.warning(
             "Windows HDHomeRun source defaults were written to HKCU only. "
             "HDHomeRun Setup reads HKLM, so import this file as Administrator: %s",
             reg_path,
         )
     else:
-        reg_path = write_windows_hdhr_registry_file(cfg, model, source_type, source)
+        reg_path = write_windows_hdhr_registry_file(
+            cfg, model, source_type, source, channelmap=plan.channelmap
+        )
         logger.warning(
             "Could not write HDHomeRun tuner source registry defaults. "
             "Import this file as Administrator: %s. Last error: %s",
@@ -254,16 +263,23 @@ def configure_windows_hdhr_sources(cfg: Config):
         )
 
 
-def _registry_model_name(model_number: str) -> str:
+def _registry_model_name(model_number: str, tuner_type: str = "atsc") -> str:
     model = (model_number or "").lower()
+    suffix = "dvbt" if normalize_tuner_type(tuner_type) == DVBT else "atsc"
     if "hdhr4" in model:
-        return "hdhomerun4_atsc"
+        return "hdhomerun4_" + suffix
     if "hdhr3" in model:
-        return "hdhomerun3_atsc"
-    return "hdhomerun4_atsc"
+        return "hdhomerun3_" + suffix
+    return "hdhomerun4_" + suffix
 
 
-def write_windows_hdhr_registry_file(cfg: Config, model: str, source_type: str, source: str) -> str:
+def write_windows_hdhr_registry_file(
+    cfg: Config,
+    model: str,
+    source_type: str,
+    source: str,
+    channelmap: str = "us-bcast",
+) -> str:
     path = os.path.join(os.getcwd(), f"hdhr_wmc_{cfg.device_id}.reg")
     tuner_names = [cfg.device_id] + [f"{cfg.device_id}-{i}" for i in range(cfg.tuner_count)]
     lines = ["Windows Registry Editor Version 5.00", ""]
@@ -281,7 +297,7 @@ def write_windows_hdhr_registry_file(cfg: Config, model: str, source_type: str, 
                 '"BDAPIDFilter"="Enabled"',
                 '"BDAVCTMode"="Normal"',
                 '"ChannelMapping"="Native"',
-                '"Channelmap"="us-bcast"',
+                f'"Channelmap"="{channelmap}"',
                 f'"DeviceID"="{cfg.device_id}"',
                 "",
             ])
@@ -367,6 +383,13 @@ def run_proxy(cfg: Config):
     logger.info(f"Device ID: {cfg.device_id}")
     logger.info(f"Model: {cfg.model_number}")
     logger.info(f"Tuners: {cfg.tuner_count}")
+    logger.info(
+        "Tuner type: %s (%s, RF %s-%s)",
+        cfg.tuner_type,
+        cfg.frequency_plan().channelmap,
+        cfg.frequency_plan().first_physical_channel,
+        cfg.frequency_plan().last_physical_channel,
+    )
 
     # Resolve listen IP for discovery responses (actual interface IP, not 0.0.0.0)
     tuner_ip = resolve_listen_ip(cfg)
@@ -394,6 +417,11 @@ def run_proxy(cfg: Config):
         tuner_count=cfg.tuner_count,
         max_physical_channel=cfg.get("max_physical_channel", 59),
         programs_per_physical=cfg.get("programs_per_physical"),
+        tuner_type=cfg.tuner_type,
+        dvb_first_channel=cfg.dvb_first_channel,
+        dvb_last_channel=cfg.dvb_last_channel,
+        dvb_bandwidth=cfg.dvb_bandwidth,
+        dvb_start_frequency=cfg.dvb_start_frequency,
     )
     xmltv_data = load_xmltv(cfg.xmltv_file, cfg.xmltv_url, channel_map)
     generated_mxf_path = None
@@ -527,6 +555,12 @@ def run_proxy(cfg: Config):
         audio_codec=cfg.ffmpeg_audio_codec,
         bitrate=cfg.ffmpeg_bitrate,
         force_vista_mode=bool(getattr(cfg, "force_vista_mode", False)),
+        tuner_type=cfg.tuner_type,
+        dvb_first_channel=cfg.dvb_first_channel,
+        dvb_last_channel=cfg.dvb_last_channel,
+        dvb_bandwidth=cfg.dvb_bandwidth,
+        dvb_start_frequency=cfg.dvb_start_frequency,
+        max_physical_channel=cfg.get("max_physical_channel", 59),
     )
     discovery.start()
 
@@ -619,6 +653,15 @@ Examples:
     parser.add_argument("--device-name", default=None, help="Friendly name (default: from config or Virtual HDHR Proxy)")
     parser.add_argument("--model", default=None, help="Model number (default: from config or HDHR4-2US)")
     parser.add_argument("--tuners", type=int, default=None, help="Number of virtual tuners (default: from config or 4)")
+    parser.add_argument(
+        "--tuner-type",
+        default=None,
+        help="Broadcast standard: atsc (default) or dvbt",
+    )
+    parser.add_argument("--dvb-first-channel", type=int, default=None, help="First DVB-T physical channel (default: 21)")
+    parser.add_argument("--dvb-last-channel", type=int, default=None, help="Last DVB-T physical channel (default: 69)")
+    parser.add_argument("--dvb-bandwidth", type=int, default=None, help="DVB-T channel bandwidth in MHz: 6, 7 or 8 (default: 8)")
+    parser.add_argument("--dvb-start-frequency", type=int, default=None, help="DVB-T centre frequency for the first channel in Hz (default: 474000000)")
 
     # Network
     parser.add_argument("--port", type=int, default=None, help="HTTP server port (default: from config or 5004)")
@@ -694,6 +737,16 @@ Examples:
         cfg.model_number = args.model
     if args.tuners is not None:
         cfg.tuner_count = args.tuners
+    if args.tuner_type is not None:
+        cfg.tuner_type = args.tuner_type
+    if args.dvb_first_channel is not None:
+        cfg.dvb_first_channel = args.dvb_first_channel
+    if args.dvb_last_channel is not None:
+        cfg.dvb_last_channel = args.dvb_last_channel
+    if args.dvb_bandwidth is not None:
+        cfg.dvb_bandwidth = args.dvb_bandwidth
+    if args.dvb_start_frequency is not None:
+        cfg.dvb_start_frequency = args.dvb_start_frequency
 
     if args.ffmpeg is not None:
         cfg.ffmpeg_path = args.ffmpeg

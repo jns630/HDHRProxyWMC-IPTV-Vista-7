@@ -3,6 +3,8 @@ import logging
 import os
 from typing import Optional
 
+from .tuner_types import DVBT, FrequencyPlan, normalize_tuner_type
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG = {
@@ -11,6 +13,11 @@ DEFAULT_CONFIG = {
     "model_number": "HDHR4-2US",
     "firmware_version": "20140101",
     "tuner_count": 4,
+    "tuner_type": "atsc",
+    "dvb_first_channel": 21,
+    "dvb_last_channel": 69,
+    "dvb_bandwidth": 8,
+    "dvb_start_frequency": 474000000,
     "http_port": 5004,
     "listen_ip": "0.0.0.0",
     "m3u_url": None,
@@ -48,6 +55,10 @@ _INT_SETTINGS = {
     "http_port": (1, 65535),
     "max_physical_channel": (2, 69),
     "fallback_channel_duration": (1, 86400),
+    "dvb_first_channel": (1, 999),
+    "dvb_last_channel": (1, 999),
+    "dvb_bandwidth": (6, 8),
+    "dvb_start_frequency": (100000000, 1000000000),
 }
 _OPTIONAL_INT_SETTINGS = {
     "programs_per_physical": (1, 252),
@@ -129,6 +140,10 @@ class Config:
         return user_cfg
 
     def _validate(self):
+        try:
+            self._data["tuner_type"] = normalize_tuner_type(self._data.get("tuner_type"))
+        except ValueError as exc:
+            raise ConfigError(str(exc))
         for key, (minimum, maximum) in _INT_SETTINGS.items():
             self._data[key] = _coerce_int(key, self._data.get(key), minimum, maximum)
         for key, (minimum, maximum) in _OPTIONAL_INT_SETTINGS.items():
@@ -157,6 +172,12 @@ class Config:
         elif not isinstance(mapping, dict):
             raise ConfigError("Setting 'channel_mapping' must be a JSON object.")
 
+        if self._data["tuner_type"] == DVBT and self._data["dvb_last_channel"] < self._data["dvb_first_channel"]:
+            raise ConfigError(
+                "Setting 'dvb_last_channel' must be greater than or equal to "
+                "'dvb_first_channel'."
+            )
+
     def __getattr__(self, name):
         if name.startswith("_"):
             return super().__getattribute__(name)
@@ -173,6 +194,17 @@ class Config:
     def validate(self):
         """Validate the current values, raising ConfigError on invalid settings."""
         self._validate()
+
+    def frequency_plan(self) -> FrequencyPlan:
+        """Return the frequency/modulation plan for the configured tuner type."""
+        return FrequencyPlan(
+            tuner_type=self._data["tuner_type"],
+            dvb_first_channel=self._data["dvb_first_channel"],
+            dvb_last_channel=self._data["dvb_last_channel"],
+            dvb_bandwidth=self._data["dvb_bandwidth"],
+            dvb_start_frequency=self._data["dvb_start_frequency"],
+            atsc_max_physical_channel=self._data["max_physical_channel"],
+        )
 
     def get(self, key, default=None):
         return self._data.get(key, default)

@@ -73,6 +73,8 @@ These fixes were added specifically to prevent wrong-channel playback, black scr
 
 ### Current working build
 
+- Added opt-in DVB-T tuner support (`tuner_type: "dvbt"`, `--tuner-type dvbt`) with DVB-T frequencies, `eu-bcast`/`dvbt` discovery values, `dvbt` lineup modulation, minimal DVB SI (PAT/PMT/SDT) during scans, and DVB-T registry/discovery model names. ATSC remains the default and is unchanged.
+
 - Configuration files are now validated at startup: missing/malformed JSON and out-of-range values produce a clear error and exit code `2` instead of a traceback.
 - Command-line options now override `config.json` only when explicitly supplied. Previously, argparse defaults for `--port`, `--tuners`, `--device-id`, `--device-name`, `--model`, `--listen-ip`, codec, and bitrate silently replaced the config file's values.
 - Restored Python 3.6 compatibility for ffmpeg capability detection (removed `subprocess.run(capture_output=..., text=...)`, which is Python 3.7+).
@@ -150,6 +152,7 @@ The checked-in `requirements.txt` intentionally has no required runtime packages
      "model_number": "HDHR4-2US",
      "firmware_version": "20140101",
      "tuner_count": 4,
+     "tuner_type": "atsc",
      "http_port": 5004,
      "listen_ip": "0.0.0.0",
      "m3u_file": "playlists/channels.m3u",
@@ -232,6 +235,18 @@ Increase the virtual tuner count:
 python main.py --config config.json --tuners 4
 ```
 
+Run the virtual tuner as a DVB-T device instead of ATSC:
+
+```powershell
+python main.py --config config.json --tuner-type dvbt --model HDHR4-2DT
+```
+
+DVB-T defaults to European UHF channels 21-69, 8 MHz bandwidth, starting at 474 MHz. Adjust the plan for other regions:
+
+```powershell
+python main.py --tuner-type dvbt --dvb-first-channel 21 --dvb-last-channel 48 --dvb-bandwidth 7 --dvb-start-frequency 474000000
+```
+
 ## Configuration Reference
 
 Values in `config.json` are used unless the matching command-line option is explicitly supplied. Unknown keys are ignored with a warning, and invalid values stop startup with a clear message so a typo cannot silently change the lineup or bind address.
@@ -243,6 +258,11 @@ Values in `config.json` are used unless the matching command-line option is expl
 | `model_number` | Advertised HDHomeRun model. | `HDHR4-2US` |
 | `firmware_version` | Advertised firmware version. | `20140101` |
 | `tuner_count` | Number of simultaneous virtual tuners/streams allowed. | `4` |
+| `tuner_type` | Broadcast standard: `atsc` (default) or `dvbt`. ATSC behavior is unchanged. | `atsc` |
+| `dvb_first_channel` | First virtual DVB-T physical channel. | `21` |
+| `dvb_last_channel` | Last virtual DVB-T physical channel. | `69` |
+| `dvb_bandwidth` | DVB-T channel bandwidth in MHz (6, 7, or 8). | `8` |
+| `dvb_start_frequency` | Centre frequency in Hz for `dvb_first_channel`. | `474000000` |
 | `http_port` | HTTP API and stream port. | `5004` |
 | `listen_ip` | Bind address. Use `0.0.0.0` for all interfaces. | `0.0.0.0` |
 | `m3u_file` | Path to a local M3U/M3U8 playlist. | `null` |
@@ -259,6 +279,17 @@ Values in `config.json` are used unless the matching command-line option is expl
 | `fallback_channel_duration` | Reserved fallback duration value. | `60` |
 | `channel_mapping` | Optional mapping from channel names to guide numbers. | `{}` |
 | `lineup_source` | Advertised lineup source. The proxy forces this to `Antenna` for WMC behavior. | `Antenna` |
+
+### DVB-T Mode
+
+Set `"tuner_type": "dvbt"` in `config.json` (or pass `--tuner-type dvbt`) to advertise a DVB-T device. In this mode the proxy:
+
+- Reports `eu-bcast`, `dvbt`, and the DVB-T frequency plan through HDHomeRun control endpoints such as `/sys/features`, `/sys/channelmap`, and `/sys/dvbc_modulation`.
+- Builds `lineup.json` with `"Modulation": "dvbt"` and DVB-T centre frequencies instead of 8-VSB/ATSC frequencies.
+- Emits minimal DVB SI (PAT, PMT, and SDT) during scans so clients can discover the virtual services.
+- Writes `hdhomerun4_dvbt`/`hdhomerun3_dvbt` to the Windows registry and `hdhr4_dvbt` to `discover.json`.
+
+ATSC remains the default and its frequencies, modulation, PSIP tables, and registry values are unchanged. Use `--model HDHR4-2DT` (or another DVB-T model number) when you want the advertised model number to match the tuner type.
 
 ## Playlist Format
 
