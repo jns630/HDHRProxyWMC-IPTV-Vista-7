@@ -24,7 +24,9 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 from typing import Callable, Dict, List, Optional, Tuple
 
+from .hardware import hw_decode_args, hw_encoder_args, select_hw_encoder
 from .m3u_parser import M3UParser
+from .probe import is_wmc_compatible_h264, probe_stream, resolve_ffprobe_path
 from .tuner_types import (
     ATSC_FREQUENCIES,
     ATSC_PROGRAM_NUMBER,
@@ -335,6 +337,10 @@ class DiscoveryServer:
         output_codec: str = "mpeg2video",
         audio_codec: str = "ac3",
         bitrate: str = "4000k",
+        hw_accel: str = "auto",
+        hw_decode: str = "off",
+        copy_video: str = "auto",
+        ffprobe_path: str = "ffprobe",
         force_vista_mode: bool = False,
         tuner_type: str = "atsc",
         dvb_first_channel: int = 21,
@@ -359,6 +365,14 @@ class DiscoveryServer:
         self.output_codec = output_codec
         self.audio_codec = audio_codec
         self.bitrate = bitrate
+        self.hw_accel = hw_accel
+        self.hw_decode = hw_decode
+        self.copy_video = copy_video
+        self.ffprobe_path = resolve_ffprobe_path(self.ffmpeg_path, ffprobe_path)
+        self._hw_encoder: Optional[str] = None
+        self._hw_encoder_resolved = False
+        self._copy_video_blacklist: set = set()
+        self._copy_video_blacklist_lock = threading.Lock()
         self.force_vista_mode = force_vista_mode
         self.frequency_plan = FrequencyPlan(
             tuner_type=tuner_type,
@@ -412,6 +426,7 @@ class DiscoveryServer:
                 "source_url": None,
                 "temp_source_path": None,
                 "stream_announced": False,
+                "video_copy_active": False,
                 "startup_thread": None,
                 "stream_restart_failures": 0,
                 "stream_restart_window_started_at": 0.0,
@@ -999,7 +1014,8 @@ class DiscoveryServer:
                 "high_freq": high_freq,
                 "major": major,
                 "minor": minor,
-                "name": self._scanned_call_sign(item, channel, f"CH{major}-{minor}"),
+                "name": str(item.get("GuideName") or getattr(channel, "name", f"CH{major}-{minor}")).strip(),
+                "guide_name": str(item.get("GuideName") or getattr(channel, "name", "")).strip(),
                 "program": program_number,
                 "pmt_pid": pmt_pid,
                 "video_pid": video_pid,
@@ -1337,8 +1353,9 @@ class DiscoveryServer:
         return scan_map
 
     def _safe_channel_name(self, name: str) -> str:
-        clean = re.sub(r"[^A-Za-z0-9_.+-]+", "-", name or "VirtualHD")
-        return clean.strip("-")[:32] or "VirtualHD"
+        clean = re.sub(r"[^\w\s_.+-]+", "", name or "VirtualHD", flags=re.UNICODE)
+        clean = re.sub(r"\s+", " ", clean).strip()
+        return clean[:32] or "VirtualHD"
 
     def _scanned_call_sign(self, item: Dict, channel, fallback: str) -> str:
         explicit = str(item.get("ScannedCallSign") or item.get("CallSign") or "").strip()
@@ -1496,14 +1513,37 @@ class DiscoveryServer:
             log_file.write((f"\n\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} target={stream_target} ffmpeg_target={ffmpeg_target} source={source_url} ===\n").encode("utf-8"))
             log_file.write((f"Python UDP bridge: {udp_addr[0]}:{udp_addr[1]} @ {self._transport_bps()} bps\n").encode("utf-8"))
             log_file.write((" ".join(cmd) + "\n").encode("utf-8", errors="replace"))
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=log_file,
-                stdin=subprocess.DEVNULL,
-            )
+            state["video_copy_active"] = self._cmd_uses_video_copy(cmd)
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=log_file,
+                    stdin=subprocess.DEVNULL,
+                )
+            except OSError:
+                if not state.get("video_copy_active"):
+                    raise
+                # The source probed as H.264 but ffmpeg refused to copy it.
+                # Blacklist copy for this source and retry once with the normal
+                # encoder path (which may use NVENC/QSV/AMF or libx264).
+                logger.warning(
+                    "Video copy failed to start for tuner%s; retrying with re-encode.",
+                    tuner_idx,
+                )
+                self._disable_copy_video_for_source(source_url)
+                state["video_copy_active"] = False
+                cmd = self._build_udp_ffmpeg_cmd(source_url, state.get("rf"))
+                log_file.write((f"--- fallback to re-encode ---\n{' '.join(cmd)}\n").encode("utf-8", errors="replace"))
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=log_file,
+                    stdin=subprocess.DEVNULL,
+                )
         except OSError as e:
             logger.warning("Unable to start ffmpeg for HDHR target %s: %s", target, e)
+            state["target"] = target
             return
 
         stream_stop = threading.Event()
@@ -2548,6 +2588,20 @@ class DiscoveryServer:
             state["stream_announced"] = False
             self._drop_prepared_input_cache_entry(source_url)
 
+            # If a stream-copy attempt died before producing a healthy amount
+            # of output, treat the source as not copy-safe and let the restart
+            # path fall back to the normal encoder (hardware or libx264).
+            if state.get("video_copy_active") and (bytes_sent < 1024 * 1024 or elapsed < 8.0):
+                logger.warning(
+                    "Video copy ended early for tuner%s (%.1fs, %d bytes); "
+                    "retrying this source with re-encode.",
+                    tuner_idx,
+                    elapsed,
+                    bytes_sent,
+                )
+                self._disable_copy_video_for_source(source_url)
+            state["video_copy_active"] = False
+
             if log_file:
                 try:
                     log_file.close()
@@ -3050,7 +3104,7 @@ class DiscoveryServer:
     def _build_udp_ffmpeg_cmd(self, source_url: str, rf: Optional[Dict] = None) -> List[str]:
         service_id = int(rf.get("program", ATSC_PROGRAM_NUMBER)) if rf else ATSC_PROGRAM_NUMBER
         ts_id = int(rf.get("physical", 1)) if rf else 1
-        service_name = rf.get("name", "VirtualHD") if rf else "VirtualHD"
+        service_name = ((rf or {}).get("guide_name") or (rf or {}).get("name") or "VirtualHD")
         transport_bps = self._transport_bps()
         effective_bitrate = self._effective_bitrate(source_url)
         pmt_pid = int(rf.get("pmt_pid") or 0x31) if rf else 0x31
@@ -3102,17 +3156,29 @@ class DiscoveryServer:
             # segment boundary does not pay a fresh TLS handshake.
             input_args.extend(self._http_persistent_args(self.ffmpeg_path))
 
+        copy_video = self._should_copy_video(source_url)
+        # Hardware decode is pointless for stream copy and can make ffmpeg
+        # reject the input; only add it on the re-encode path.
+        if not copy_video:
+            input_args.extend(hw_decode_args(self._resolve_hw_encoder(), self.hw_decode))
         input_args.extend(["-i", source_url])
         video_map = self._local_hls_video_map(source_url)
         audio_map = self._local_hls_audio_map(source_url)
         output_args = [
             "-map", video_map,
             "-map", audio_map,
-            "-fps_mode", "cfr",
+            "-fps_mode", "passthrough" if copy_video else "cfr",
             "-dn",
             "-sn",
         ]
-        return input_args + output_args + self._video_encoder_args(effective_bitrate, self._uses_hls_quality_profile(source_url)) + [
+        if copy_video:
+            video_args = ["-c:v", "copy"]
+        else:
+            video_args = self._video_encoder_args(
+                effective_bitrate,
+                self._uses_hls_quality_profile(source_url),
+            )
+        return input_args + output_args + video_args + [
             "-c:a", "ac3",
             "-b:a", "192k",
             "-ar", "48000",
@@ -3136,6 +3202,67 @@ class DiscoveryServer:
             "pipe:1",
         ]
 
+    def _should_copy_video(self, source_url: str) -> bool:
+        """Return True when the live source is already WMC-compatible H.264.
+
+        Vista/WMC only decodes MPEG-2, so copy mode is never used there.  For
+        Windows 7+ the source can be remuxed when ffprobe confirms H.264 8-bit
+        yuv420p at a WMC-friendly profile/level; otherwise the normal encoder
+        path runs.
+        """
+        preference = str(self.copy_video or "auto").strip().lower()
+        if preference in ("off", "none", "false", "0", "never"):
+            return False
+        if bool(getattr(self, "force_vista_mode", False)):
+            return False
+        codec = (self.output_codec or "").lower()
+        if codec not in ("h264", "libx264", "mpeg4_h264", "mpeg4-avc", "avc"):
+            return False
+        if preference not in ("auto", "on", "true", "1", "always", "yes"):
+            return False
+        with self._copy_video_blacklist_lock:
+            if source_url in self._copy_video_blacklist:
+                logger.info("Video copy previously failed for this source; using the encoder path.")
+                return False
+        info = probe_stream(source_url, self.ffprobe_path)
+        if not info:
+            return False
+        compatible = is_wmc_compatible_h264(info)
+        if compatible:
+            logger.info(
+                "Source is WMC-compatible H.264 (%s, %s, level %s); copying video without re-encoding.",
+                info.get("profile") or "unknown profile",
+                info.get("pix_fmt") or "unknown pix_fmt",
+                info.get("level") or "?",
+            )
+        else:
+            logger.info(
+                "Source video is %s (%s, %s); re-encoding for WMC.",
+                info.get("video_codec") or "unknown",
+                info.get("profile") or "unknown profile",
+                info.get("pix_fmt") or "unknown pix_fmt",
+            )
+        return compatible
+
+    def _disable_copy_video_for_source(self, source_url: Optional[str]) -> None:
+        if not source_url:
+            return
+        with self._copy_video_blacklist_lock:
+            self._copy_video_blacklist.add(source_url)
+
+    @staticmethod
+    def _cmd_uses_video_copy(cmd: List[str]) -> bool:
+        for index, value in enumerate(cmd):
+            if value == "-c:v" and index + 1 < len(cmd) and cmd[index + 1].lower() == "copy":
+                return True
+        return False
+
+    def _resolve_hw_encoder(self) -> Optional[str]:
+        if not self._hw_encoder_resolved:
+            self._hw_encoder = select_hw_encoder(self.ffmpeg_path, self.hw_accel)
+            self._hw_encoder_resolved = True
+        return self._hw_encoder
+
     def _video_encoder_args(self, effective_bitrate: str, use_hls_profile: bool = False) -> List[str]:
         codec = (self.output_codec or "mpeg2video").lower()
         vista_mode = bool(getattr(self, "force_vista_mode", False))
@@ -3153,6 +3280,16 @@ class DiscoveryServer:
         if not vista_mode:
             common.extend(["-maxrate:v", effective_bitrate, "-bufsize:v", video_bufsize])
         if codec in ("h264", "libx264", "mpeg4_h264", "mpeg4-avc", "avc"):
+            hw_encoder = self._resolve_hw_encoder() if not vista_mode else None
+            if hw_encoder:
+                return hw_encoder_args(
+                    hw_encoder,
+                    effective_bitrate,
+                    frame_size,
+                    video_bufsize,
+                    profile="high",
+                    level="4.0",
+                )
             return [
                 "-c:v", "libx264",
                 "-preset", "ultrafast",

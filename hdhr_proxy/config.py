@@ -41,6 +41,10 @@ DEFAULT_CONFIG = {
     "ffmpeg_output_codec": "mpeg2video",
     "ffmpeg_audio_codec": "ac3",
     "ffmpeg_bitrate": "4000k",
+    "ffmpeg_hw_accel": "auto",
+    "ffmpeg_hw_decode": "off",
+    "ffmpeg_copy_video": "auto",
+    "ffprobe_path": "ffprobe",
     "udp_bind_ip": "0.0.0.0",
     "fallback_channel_duration": 60,
     "channel_mapping": {},
@@ -161,7 +165,7 @@ class Config:
                 raise ConfigError("Setting %r must be a non-empty string." % key)
             self._data[key] = value.strip()
 
-        for key in ("m3u_file", "m3u_url", "hls_base_url", "xmltv_file", "xmltv_url", "ffmpeg_path"):
+        for key in ("m3u_file", "m3u_url", "hls_base_url", "xmltv_file", "xmltv_url", "ffmpeg_path", "ffmpeg_hw_accel", "ffmpeg_hw_decode", "ffmpeg_copy_video", "ffprobe_path"):
             value = self._data.get(key)
             if value is not None and not isinstance(value, str):
                 raise ConfigError("Setting %r must be a string or null." % key)

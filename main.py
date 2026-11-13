@@ -346,15 +346,24 @@ def write_hdhrproxy_mapping_file(lineup, path: str = "HDHRProxyIPTV_MappingList.
 
 def find_local_ip() -> str:
     import socket
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    # Prefer the interface that has a route to the public internet. This avoids
+    # picking virtual/VPN adapters (e.g. 198.18.x.x) on multi-homed hosts.
+    for target in (("8.8.8.8", 53), ("1.1.1.1", 53)):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.settimeout(0.5)
+            sock.connect(target)
+            ip = sock.getsockname()[0]
+            if ip and not ip.startswith("127."):
+                return ip
+        except Exception:
+            pass
+        finally:
+            sock.close()
     try:
-        sock.settimeout(0.5)
-        sock.connect(("10.255.255.255", 1))
-        return sock.getsockname()[0]
+        return socket.gethostbyname(socket.gethostname())
     except Exception:
         return "127.0.0.1"
-    finally:
-        sock.close()
 
 
 def resolve_listen_ip(cfg: Config) -> str:
@@ -554,6 +563,10 @@ def run_proxy(cfg: Config):
         output_codec=cfg.ffmpeg_output_codec,
         audio_codec=cfg.ffmpeg_audio_codec,
         bitrate=cfg.ffmpeg_bitrate,
+        hw_accel=cfg.get("ffmpeg_hw_accel", "auto"),
+        hw_decode=cfg.get("ffmpeg_hw_decode", "off"),
+        copy_video=cfg.get("ffmpeg_copy_video", "auto"),
+        ffprobe_path=cfg.get("ffprobe_path", "ffprobe"),
         force_vista_mode=bool(getattr(cfg, "force_vista_mode", False)),
         tuner_type=cfg.tuner_type,
         dvb_first_channel=cfg.dvb_first_channel,
@@ -673,6 +686,26 @@ Examples:
     parser.add_argument("--output-codec", default=None, help="ffmpeg output video codec (default: from config or mpeg2video)")
     parser.add_argument("--audio-codec", default=None, help="ffmpeg output audio codec (default: from config or ac3)")
     parser.add_argument("--bitrate", default=None, help="ffmpeg output bitrate (default: from config or 4000k)")
+    parser.add_argument(
+        "--hw-accel",
+        default=None,
+        help="Hardware H.264 encoder: auto, off, nvenc, qsv, amf (default: from config or auto)",
+    )
+    parser.add_argument(
+        "--hw-decode",
+        default=None,
+        help="Hardware decoding: auto or off (default: from config or off)",
+    )
+    parser.add_argument(
+        "--copy-video",
+        default=None,
+        help="Copy WMC-compatible H.264 source video: auto or off (default: from config or auto)",
+    )
+    parser.add_argument(
+        "--ffprobe",
+        default=None,
+        help="Path to ffprobe (default: from config or ffprobe beside ffmpeg)",
+    )
     parser.add_argument("--vista", action="store_true", help="Force Vista-specific WMC codec behavior for client testing")
     parser.add_argument("--vista-subchannels", type=int, help="Vista scan test mode: fixed subchannels per RF, for example 20")
 
@@ -758,6 +791,14 @@ Examples:
         cfg.ffmpeg_audio_codec = args.audio_codec
     if args.bitrate is not None:
         cfg.ffmpeg_bitrate = args.bitrate
+    if args.hw_accel is not None:
+        cfg.ffmpeg_hw_accel = args.hw_accel
+    if args.hw_decode is not None:
+        cfg.ffmpeg_hw_decode = args.hw_decode
+    if args.copy_video is not None:
+        cfg.ffmpeg_copy_video = args.copy_video
+    if args.ffprobe is not None:
+        cfg.ffprobe_path = args.ffprobe
     if args.vista:
         cfg.force_vista_mode = True
     if args.vista_subchannels is not None:
