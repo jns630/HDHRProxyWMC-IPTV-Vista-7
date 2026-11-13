@@ -19,3 +19,6 @@ ffmpeg/
 
 # PyInstaller temporary build cache
 build/
+
+# Local agent instructions; keep local, do not publish
+AGENTS.md

@@ -450,6 +450,22 @@ def _build_channel_metadata(
     return meta_by_service
 
 
+def latest_programme_end(xmltv_xml: str) -> Optional[datetime]:
+    """Return the newest XMLTV programme stop time, or None if unavailable."""
+    if not xmltv_xml:
+        return None
+    try:
+        root = ET.fromstring(xmltv_xml)
+    except ET.ParseError:
+        return None
+    latest: Optional[datetime] = None
+    for programme in root.findall("programme"):
+        stop_dt = _parse_xmltv_datetime(programme.attrib.get("stop"))
+        if stop_dt and (latest is None or stop_dt > latest):
+            latest = stop_dt
+    return latest
+
+
 def _collect_programmes(xmltv_xml: str, channel_meta: Dict[str, Dict]) -> Dict[str, List[Dict]]:
     programmes_by_service: Dict[str, List[Dict]] = {meta["service_id"]: [] for meta in channel_meta.values()}
     if not xmltv_xml:

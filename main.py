@@ -22,6 +22,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 
 from hdhr_proxy import __version__
@@ -40,6 +41,7 @@ from hdhr_proxy.guide_match import (
     write_wmc_auto_match_mxf,
 )
 from hdhr_proxy.mxf import (
+    latest_programme_end,
     write_mxf,
     import_mxf,
     import_and_map_mxf_with_epg123,
@@ -433,6 +435,19 @@ def run_proxy(cfg: Config):
         dvb_start_frequency=cfg.dvb_start_frequency,
     )
     xmltv_data = load_xmltv(cfg.xmltv_file, cfg.xmltv_url, channel_map)
+    xmltv_is_fresh = True
+    if xmltv_data:
+        latest_end = latest_programme_end(xmltv_data.filtered_xml)
+        if latest_end and latest_end <= datetime.now(timezone.utc) - timedelta(minutes=1):
+            xmltv_is_fresh = False
+            logger.error(
+                "XMLTV guide is stale: its newest programme ended at %s UTC. "
+                "Refusing to import it so the existing WMC guide is not cleared. "
+                "Update the upstream EPG source and run the import again.",
+                latest_end.strftime("%Y-%m-%d %H:%M"),
+            )
+        elif latest_end:
+            logger.info("XMLTV guide is current through %s UTC.", latest_end.strftime("%Y-%m-%d %H:%M"))
     generated_mxf_path = None
     auto_match_mxf_path = None
     vista_guide_xml_path = None
@@ -454,7 +469,9 @@ def run_proxy(cfg: Config):
                 vista_mode=vista_mode,
             )
             generated_mxf_path = mxf_path
-            if cfg.import_mxf:
+            if cfg.import_mxf and not xmltv_is_fresh:
+                logger.warning("Skipping MXF import because the XMLTV guide is stale.")
+            elif cfg.import_mxf:
                 if vista_mode:
                     vista_guide_xml_path = write_vista_guide_xml(
                         xmltv_data.filtered_xml,
@@ -479,7 +496,9 @@ def run_proxy(cfg: Config):
                 epg123_mode=use_epg123_map,
             )
             logger.info("Wrote WMC auto-match MXF (%s matched channels): %s", auto_match_count, auto_match_mxf_path)
-            if cfg.import_auto_match_mxf:
+            if cfg.import_auto_match_mxf and not xmltv_is_fresh:
+                logger.warning("Skipping auto-match MXF import because the XMLTV guide is stale.")
+            elif cfg.import_auto_match_mxf:
                 if use_epg123_map:
                     logger.info("Importing lineup-matched guide into the WMC internal database via EPG123 auto-match when available")
                     try:
