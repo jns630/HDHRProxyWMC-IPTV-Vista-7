@@ -22,3 +22,7 @@ build/
 
 # Local agent instructions; keep local, do not publish
 AGENTS.md
+
+# Your own config file, don't publish this
+
+config.json
