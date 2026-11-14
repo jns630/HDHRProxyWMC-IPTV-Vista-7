@@ -169,10 +169,13 @@ jobs:
           set -euo pipefail
           if [ "${LEGACY}" = "true" ]; then
             python -m pip install --upgrade "pip<22" "setuptools<60" "wheel<0.38"
-            python -m pip install "nuitka==1.9.7" "zstandard==0.19.0"
+            # Nuitka 4.x still supports Python 3.6.  zstandard 0.19.0 is the
+            # newest wheel available for cp36 and is needed for onefile
+            # compression.
+            python -m pip install "nuitka==4.3.5" "zstandard==0.19.0"
           else
             python -m pip install --upgrade pip
-            python -m pip install "nuitka==4.3.5"
+            python -m pip install "nuitka[onefile]==4.3.5"
           fi
 
       - name: Build onefile (Unix)
