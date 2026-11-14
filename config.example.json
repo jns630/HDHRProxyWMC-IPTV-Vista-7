@@ -11,6 +11,7 @@
   "m3u_url": null,
   "hls_base_url": null,
   "xmltv_url": "https://epg.pw/xmltv/epg_CN.xml",
+  "include_unmatched_channels": false,
   "ffmpeg_path": "ffmpeg",
   "ffmpeg_enabled": true,
   "ffmpeg_copy_video": "auto",
