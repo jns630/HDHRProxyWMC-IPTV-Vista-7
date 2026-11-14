@@ -31,6 +31,7 @@ from hdhr_proxy.tuner_types import DVBT, normalize_tuner_type
 from hdhr_proxy.m3u_parser import M3UParser, build_lineup
 from hdhr_proxy.discovery import DiscoveryServer, normalize_device_id
 from hdhr_proxy.http_server import HDHRHTTPServer
+from hdhr_proxy.parent_watchdog import install_parent_watchdog
 from hdhr_proxy.guide_match import (
     GUIDE_MATCH_CSV_PATH,
     GUIDE_ONLY_INI_PATH,
@@ -139,6 +140,11 @@ def wmc_video_codec_for_current_os(force_vista: bool = False) -> str:
     return "libx264"
 
 
+def wmc_epg_import_supported() -> bool:
+    """EPG import uses Windows Media Center tools and is Windows-only."""
+    return platform.system().lower() == "windows"
+
+
 def apply_wmc_video_codec_policy(cfg: Config):
     codec = wmc_video_codec_for_current_os(force_vista=bool(getattr(cfg, "force_vista_mode", False)))
     if cfg.ffmpeg_output_codec != codec:
@@ -153,6 +159,14 @@ def apply_wmc_video_codec_policy(cfg: Config):
 
 
 def import_mxf_for_current_wmc(output_path: str, vista_mode: bool = False, vista_xml_path: str = None) -> bool:
+    if not wmc_epg_import_supported():
+        logger.warning(
+            "Skipping Windows Media Center EPG import on %s. "
+            "The generated MXF can be imported on a Windows Media Center machine: %s",
+            platform.system() or "this OS",
+            output_path,
+        )
+        return False
     if vista_mode:
         try:
             import_mxf(output_path, vista_tv_pack=True)
@@ -448,6 +462,14 @@ def run_proxy(cfg: Config):
             )
         elif latest_end:
             logger.info("XMLTV guide is current through %s UTC.", latest_end.strftime("%Y-%m-%d %H:%M"))
+    epg_import_supported = wmc_epg_import_supported()
+    if xmltv_data and not epg_import_supported:
+        logger.warning(
+            "EPG import is disabled on %s. The proxy will still generate MXF files, "
+            "but loadmxf/EPG123 will not be called. Import the generated MXF on a "
+            "Windows Media Center machine.",
+            platform.system() or "this OS",
+        )
     generated_mxf_path = None
     auto_match_mxf_path = None
     vista_guide_xml_path = None
@@ -469,7 +491,9 @@ def run_proxy(cfg: Config):
                 vista_mode=vista_mode,
             )
             generated_mxf_path = mxf_path
-            if cfg.import_mxf and not xmltv_is_fresh:
+            if cfg.import_mxf and not epg_import_supported:
+                logger.warning("Skipping MXF import because EPG import is Windows-only.")
+            elif cfg.import_mxf and not xmltv_is_fresh:
                 logger.warning("Skipping MXF import because the XMLTV guide is stale.")
             elif cfg.import_mxf:
                 if vista_mode:
@@ -497,7 +521,9 @@ def run_proxy(cfg: Config):
                 include_unmatched=bool(cfg.get("include_unmatched_channels", False)),
             )
             logger.info("Wrote WMC auto-match MXF (%s channels): %s", auto_match_count, auto_match_mxf_path)
-            if cfg.import_auto_match_mxf and not xmltv_is_fresh:
+            if cfg.import_auto_match_mxf and not epg_import_supported:
+                logger.warning("Skipping auto-match MXF import because EPG import is Windows-only.")
+            elif cfg.import_auto_match_mxf and not xmltv_is_fresh:
                 logger.warning("Skipping auto-match MXF import because the XMLTV guide is stale.")
             elif cfg.import_auto_match_mxf:
                 if use_epg123_map:
@@ -539,7 +565,14 @@ def run_proxy(cfg: Config):
             lineup, channel_map = filter_lineup_to_matched_channels(lineup, channel_map, guide_rows)
             logger.info("Guide-only lineup mode enabled: advertising %s matched channels to WMC scan", len(lineup))
     elif cfg.import_mxf and cfg.mxf_file and os.path.exists(cfg.mxf_file):
-        import_mxf(cfg.mxf_file)
+        if epg_import_supported:
+            import_mxf(cfg.mxf_file)
+        else:
+            logger.warning(
+                "Skipping MXF import because EPG import is Windows-only. "
+                "The MXF is available for import on a Windows Media Center machine: %s",
+                os.path.abspath(cfg.mxf_file),
+            )
     elif cfg.write_mxf or cfg.import_mxf:
         logger.error("MXF generation requires --xmltv-file or --xmltv-url. To import an existing file, use --import-mxf path\\to\\guide.mxf.")
         sys.exit(1)
@@ -605,6 +638,16 @@ def run_proxy(cfg: Config):
         discovery.stop()
         http_server.stop()
         return
+
+    compiled = globals().get("__compiled__")
+    nuitka_onefile = bool(compiled is not None and getattr(compiled, "onefile", False))
+
+    def _watchdog_shutdown():
+        stop_event.set()
+        discovery.stop()
+        http_server.stop()
+
+    install_parent_watchdog(nuitka_onefile, _watchdog_shutdown)
 
     logger.info("Proxy running. Press Ctrl+C to stop.")
 
@@ -843,6 +886,14 @@ Examples:
         return
 
     if cfg.import_mxf and isinstance(args.import_mxf, str) and not cfg.m3u_file and not cfg.m3u_url and not cfg.xmltv_file and not cfg.xmltv_url:
+        if not wmc_epg_import_supported():
+            logger.error(
+                "EPG import is Windows-only. On %s, copy the MXF to a Windows Media Center "
+                "machine and import it there: %s",
+                platform.system() or "this OS",
+                os.path.abspath(cfg.mxf_file),
+            )
+            sys.exit(2)
         import_mxf_for_current_wmc(cfg.mxf_file, vista_mode=bool(getattr(cfg, "force_vista_mode", False)))
         return
 

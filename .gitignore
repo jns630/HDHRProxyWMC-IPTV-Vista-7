@@ -5,6 +5,9 @@ __pycache__/
 # Runtime logs and generated scan/output files
 *.log
 HDHRProxyIPTV_MappingList.generated.ini
+HDHRProxyWMC_AutoMatch.generated.mxf
+HDHRProxyWMC_GuideMatch.generated.csv
+HDHRProxyWMC_GuideOnly.generated.ini
 hdhr_wmc_*.reg
 *_backup.reg
 wmc_tuners_backup.reg
@@ -19,6 +22,15 @@ ffmpeg/
 
 # PyInstaller temporary build cache
 build/
+
+# Nuitka build outputs
+nuitka-build*/
+dist-nuitka*/
+nuitka-out/
+release-assets/
+*.dist/
+*.build/
+*.onefile-build/
 
 # Local agent instructions; keep local, do not publish
 AGENTS.md

@@ -355,6 +355,14 @@ C:\Windows\ehome\loadmxf.exe -v -i guide.mxf
 
 On this machine I verified that `loadmxf.exe` accepts the generated MXF structure in a test store.
 
+### Non-Windows EPG import
+
+`loadmxf.exe` and `EPG123` only exist on Windows. When the proxy runs on
+Linux or macOS it still generates the requested MXF files, but it will not
+attempt to import them. Copy the generated `.mxf` to a Windows Media Center
+machine and import it there, or run the proxy on Windows when you need the
+automatic import step.
+
 ### WMC guide match utility
 
 Whenever XMLTV is loaded, the proxy now also writes two helper files for Windows Media Center channel attachment:
@@ -743,6 +751,52 @@ powershell -ExecutionPolicy Bypass -File .\repair_hdhr_port.ps1
 ```
 
 The script stops WinNAT, persistently reserves only UDP `65001` so future NAT startup cannot reclaim it, restarts WinNAT, and verifies the exclusion. Restart HDHRProxy afterward. Some HDHomeRun tools require this exact port.
+
+## Packaging with Nuitka
+
+The proxy is pure standard-library Python, so it can be built with Nuitka as
+either a standalone folder or a single executable. The prebuilt Vista guide
+helper is included as a data file. `vista_helper/bin/HDHRProxyWMC-VistaGuideImport.exe`
+is also found when Nuitka onefile extracts it beside `__file__`.
+
+Build a standalone folder (recommended for stability):
+
+```powershell
+.\build_nuitka.ps1 -Mode standalone -OutputDir nuitka-build
+```
+
+Build a single executable:
+
+```powershell
+.\build_nuitka.ps1 -Mode onefile -OutputDir nuitka-build-onefile
+```
+
+Vista x86 example (32-bit Python 3.6 + a Nuitka version that still supports it):
+
+```powershell
+.\build_nuitka.ps1 `
+  -Python "C:\Python36-32\python.exe" `
+  -Mode onefile `
+  -OutputDir dist-nuitka-vista-x86 `
+  -OutputName HDHRProxyWMC-IPTV-vista-x86.exe `
+  -UacAdmin
+```
+
+Notes:
+
+- `ffmpeg` and `ffprobe` are still external; set `ffmpeg_path` / `ffprobe_path`.
+- `config.json` is intentionally not bundled. Use `config.example.json` as a template.
+- Nuitka's current 4.x line treats Python 3.15 as experimental; prefer Python
+  3.13/3.14 for production builds. Vista requires its own 32-bit Python 3.6
+  toolchain and real-machine testing.
+- Nuitka onefile builds include a parent watchdog. If the onefile bootstrap
+  process exits or is killed, the extracted child stops its tuners and HTTP /
+  discovery servers instead of staying orphaned on the network.
+- `.github/workflows/nuitka-onefile-release.yml` builds all supported
+  platforms daily when the default branch changes, creates a
+  `build-<short-hash>` release, and attaches one zip per platform. Each zip
+  contains the executable, `config.json` (copied from `config.example.json`),
+  and the `playlists` directory.
 
 ## Development
 

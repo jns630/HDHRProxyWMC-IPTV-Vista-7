@@ -1,0 +1,291 @@
+name: Nuitka Onefile Release
+
+on:
+  schedule:
+    # Daily source-update check. GitHub uses the latest commit on the default branch.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Build even if a release for this commit already exists"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nuitka-onefile-release
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check for source changes
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.gate.outputs.sha }}
+      short_sha: ${{ steps.gate.outputs.short_sha }}
+      should_build: ${{ steps.gate.outputs.should_build }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compare current commit with latest release
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force || 'false' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHA="${GITHUB_SHA}"
+          SHORT="${SHA:0:7}"
+          TAG="build-${SHORT}"
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT}" >> "$GITHUB_OUTPUT"
+          if [ "${FORCE:-false}" = "true" ]; then
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            echo "Force rebuild requested for ${TAG}."
+          elif gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            echo "Release ${TAG} already exists; nothing to build."
+          else
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            echo "Preparing ${TAG}."
+          fi
+
+  build:
+    name: Build ${{ matrix.label }}
+    needs: check
+    if: needs.check.outputs.should_build == 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Windows-x64
+            os: windows-latest
+            python: "3.13"
+            architecture: x64
+            binary: HDHRProxyWMC-IPTV
+            binary_name: HDHRProxyWMC-IPTV.exe
+            compiler: ""
+            legacy: false
+            uac_admin: false
+
+          - label: Windows-x86
+            os: windows-latest
+            python: "3.13"
+            architecture: x86
+            binary: HDHRProxyWMC-IPTV
+            binary_name: HDHRProxyWMC-IPTV.exe
+            compiler: ""
+            legacy: false
+            uac_admin: false
+
+          - label: Windows-arm64
+            os: windows-11-arm
+            python: "3.13"
+            architecture: arm64
+            binary: HDHRProxyWMC-IPTV
+            binary_name: HDHRProxyWMC-IPTV.exe
+            compiler: ""
+            legacy: false
+            uac_admin: false
+
+          - label: Windows-vista-x86
+            os: windows-2022
+            python: "3.6"
+            architecture: x86
+            binary: HDHRProxyWMC-IPTV-vista-x86
+            binary_name: HDHRProxyWMC-IPTV-vista-x86.exe
+            compiler: ""
+            legacy: true
+            uac_admin: true
+
+          - label: Linux-x64
+            os: ubuntu-24.04
+            python: "3.13"
+            architecture: x64
+            binary: HDHRProxyWMC-IPTV
+            binary_name: HDHRProxyWMC-IPTV
+            compiler: ""
+            legacy: false
+            uac_admin: false
+
+          - label: Linux-arm64
+            os: ubuntu-24.04-arm
+            python: "3.13"
+            architecture: arm64
+            binary: HDHRProxyWMC-IPTV
+            binary_name: HDHRProxyWMC-IPTV
+            compiler: ""
+            legacy: false
+            uac_admin: false
+
+          - label: Darwin-x64
+            os: macos-15-intel
+            python: "3.13"
+            architecture: x64
+            binary: HDHRProxyWMC-IPTV
+            binary_name: HDHRProxyWMC-IPTV
+            compiler: ""
+            legacy: false
+            uac_admin: false
+
+          - label: Darwin-arm64
+            os: macos-15
+            python: "3.13"
+            architecture: arm64
+            binary: HDHRProxyWMC-IPTV
+            binary_name: HDHRProxyWMC-IPTV
+            compiler: ""
+            legacy: false
+            uac_admin: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          architecture: ${{ matrix.architecture }}
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y patchelf
+
+      - name: Install Nuitka
+        shell: bash
+        env:
+          LEGACY: ${{ matrix.legacy }}
+        run: |
+          set -euo pipefail
+          if [ "${LEGACY}" = "true" ]; then
+            python -m pip install --upgrade "pip<22" "setuptools<60" "wheel<0.38"
+            python -m pip install "nuitka==1.9.7" "zstandard==0.19.0" "ordered-set>=4.1.0"
+          else
+            python -m pip install --upgrade pip
+            python -m pip install "nuitka==4.3.5"
+          fi
+
+      - name: Build onefile (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          LABEL: ${{ matrix.label }}
+          BINARY: ${{ matrix.binary }}
+        run: |
+          set -euo pipefail
+          mkdir -p "nuitka-out/${LABEL}"
+          python -m nuitka \
+            --onefile \
+            --assume-yes-for-downloads \
+            --include-data-files=vista_helper/bin/HDHRProxyWMC-VistaGuideImport.exe=HDHRProxyWMC-VistaGuideImport.exe \
+            --output-dir="nuitka-out/${LABEL}" \
+            --output-filename="${BINARY}" \
+            main.py
+
+      - name: Build onefile (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          LABEL: ${{ matrix.label }}
+          BINARY: ${{ matrix.binary }}
+          COMPILER: ${{ matrix.compiler }}
+          UAC_ADMIN: ${{ matrix.uac_admin }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $scriptArgs = @(
+            "-Mode", "onefile",
+            "-OutputDir", "nuitka-out/$env:LABEL",
+            "-OutputName", $env:BINARY
+          )
+          if ($env:COMPILER) {
+            $scriptArgs += @("-Compiler", $env:COMPILER)
+          }
+          if ($env:UAC_ADMIN -eq "true") {
+            $scriptArgs += "-UacAdmin"
+          }
+          & .\build_nuitka.ps1 @scriptArgs
+
+      - name: Package release zip
+        shell: bash
+        env:
+          LABEL: ${{ matrix.label }}
+          BINARY: ${{ matrix.binary }}
+          BINARY_NAME: ${{ matrix.binary_name }}
+        run: |
+          set -euo pipefail
+          BIN=$(ls "nuitka-out/${LABEL}/${BINARY}"* 2>/dev/null | head -n 1 || true)
+          if [ -z "${BIN}" ]; then
+            echo "Built binary not found in nuitka-out/${LABEL}"
+            ls -la "nuitka-out/${LABEL}"
+            exit 1
+          fi
+          python tools/package_build.py \
+            --binary "${BIN}" \
+            --label "${LABEL}" \
+            --binary-name "${BINARY_NAME}" \
+            --output-dir release-assets \
+            --stage-dir "nuitka-out/stage-${LABEL}"
+
+      - name: Upload release zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: HDHRProxyWMC-IPTV-${{ matrix.label }}
+          path: release-assets/HDHRProxyWMC-IPTV-${{ matrix.label }}.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Create GitHub release
+    needs: [check, build]
+    if: needs.check.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Download all release zips
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.check.outputs.sha }}
+          TAG: build-${{ needs.check.outputs.short_sha }}
+        run: |
+          set -euo pipefail
+          count=$(ls release-assets/HDHRProxyWMC-IPTV-*.zip 2>/dev/null | wc -l)
+          if [ "${count}" -ne 8 ]; then
+            echo "Expected 8 release zips, found ${count}."
+            ls -la release-assets
+            exit 1
+          fi
+          NOTES=$(git log -1 --pretty=%B "${SHA}" 2>/dev/null || true)
+          if [ -z "${NOTES}" ]; then
+            NOTES="Build ${TAG}"
+          fi
+          printf '%s\n' "${NOTES}" > release-notes.md
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release delete "${TAG}" --repo "${GITHUB_REPOSITORY}" --yes --cleanup-tag
+          fi
+          gh release create "${TAG}" \
+            release-assets/HDHRProxyWMC-IPTV-*.zip \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${TAG}" \
+            --notes-file release-notes.md
