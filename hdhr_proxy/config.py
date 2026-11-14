@@ -33,6 +33,7 @@ DEFAULT_CONFIG = {
     "import_auto_match_mxf": False,
     "map_guide_wmc": False,
     "guide_only_lineup": False,
+    "include_unmatched_channels": False,
     "force_vista_mode": False,
     "programs_per_physical": None,
     "max_physical_channel": 59,
@@ -74,6 +75,7 @@ _BOOL_SETTINGS = (
     "import_auto_match_mxf",
     "map_guide_wmc",
     "guide_only_lineup",
+    "include_unmatched_channels",
     "force_vista_mode",
     "ffmpeg_enabled",
 )

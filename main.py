@@ -494,8 +494,9 @@ def run_proxy(cfg: Config):
                 output_path=cfg.auto_match_mxf_file,
                 vista_mode=vista_mode,
                 epg123_mode=use_epg123_map,
+                include_unmatched=bool(cfg.get("include_unmatched_channels", False)),
             )
-            logger.info("Wrote WMC auto-match MXF (%s matched channels): %s", auto_match_count, auto_match_mxf_path)
+            logger.info("Wrote WMC auto-match MXF (%s channels): %s", auto_match_count, auto_match_mxf_path)
             if cfg.import_auto_match_mxf and not xmltv_is_fresh:
                 logger.warning("Skipping auto-match MXF import because the XMLTV guide is stale.")
             elif cfg.import_auto_match_mxf:
@@ -676,6 +677,11 @@ Examples:
     parser.add_argument("--map-guide-wmc", action="store_true", help="Generate and import a lineup-matched guide directly into the WMC internal database")
     parser.add_argument("--guide-only-lineup", action="store_true", help="Only advertise channels that matched XMLTV/MXF guide data")
     parser.add_argument(
+        "--include-unmatched-channels",
+        action="store_true",
+        help="Include channels without XMLTV matches in the imported guide lineup (they show no guide data but stay in WMC)",
+    )
+    parser.add_argument(
         "--hls-base-url",
         help="Original web URL for a saved HLS master playlist that uses relative variant/segment URLs",
     )
@@ -777,6 +783,8 @@ Examples:
         cfg.import_auto_match_mxf = True
     if args.guide_only_lineup:
         cfg.guide_only_lineup = True
+    if args.include_unmatched_channels:
+        cfg.include_unmatched_channels = True
     if args.port is not None:
         cfg.http_port = args.port
     if args.listen_ip is not None:

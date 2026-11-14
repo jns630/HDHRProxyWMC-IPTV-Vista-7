@@ -279,6 +279,7 @@ Values in `config.json` are used unless the matching command-line option is expl
 | `ffmpeg_hw_decode` | Hardware decoding: `auto` or `off`. Uses NVDEC, QSV, D3D11VA, VAAPI, or VideoToolbox. | `off` |
 | `ffmpeg_copy_video` | Probe the source with ffprobe and copy WMC-compatible H.264 video instead of re-encoding: `auto` or `off`. | `auto` |
 | `ffprobe_path` | Path or command name for ffprobe. Defaults to `ffprobe` beside ffmpeg. | `ffprobe` |
+| `include_unmatched_channels` | Include channels without XMLTV matches in the imported guide lineup. They show no guide data but remain available in WMC. | `false` |
 | `udp_bind_ip` | Reserved for UDP stream handling. | `0.0.0.0` |
 | `fallback_channel_duration` | Reserved fallback duration value. | `60` |
 | `channel_mapping` | Optional mapping from channel names to guide numbers. | `{}` |
@@ -413,6 +414,19 @@ For Vista, use the 32-bit Vista build and add `--vista`:
 ```
 
 On Windows 7 or newer, `--map-guide-wmc` uses EPG123 when it is installed because EPG123 knows how to activate and auto-map imported guide lineups against WMC's scanned tuner channels. Without EPG123 it falls back to `loadmxf.exe`. Vista TV Pack uses its installed `loadmxf.exe`; stock pre-TV-Pack Vista falls back to its native `ehepg` XML loader.
+
+### Keeping channels without EPG
+
+By default the auto-match MXF only contains channels that matched XMLTV. If
+your playlist has channels without guide data and you still want them in the
+WMC guide lineup, pass:
+
+```powershell
+python main.py --m3u-file "playlist.m3u" --xmltv-url "https://epg.pw/xmltv/epg_CN.xml" --map-guide-wmc --include-unmatched-channels
+```
+
+Those channels are imported with an empty schedule, so WMC shows "no guide
+data" for them but they remain selectable for live TV.
 
 ### Guide-only WMC scan mode
 

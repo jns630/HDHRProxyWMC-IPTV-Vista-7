@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from hdhr_proxy.config import Config  # noqa: E402
 from hdhr_proxy.m3u_parser import M3UChannel, build_lineup  # noqa: E402
 from hdhr_proxy.mxf import write_mxf  # noqa: E402
+from hdhr_proxy.guide_match import write_wmc_auto_match_mxf  # noqa: E402
 MXF_NS = "{urn:com:dontocsata:xmltv:mxf}"
 
 SAMPLE_XMLTV = """<?xml version="1.0" encoding="UTF-8"?>
@@ -59,6 +60,36 @@ class MxfGuideIntegrationTests(unittest.TestCase):
             for node in ET.parse(out_path).getroot().iter(MXF_NS + "Program")
         ]
         self.assertTrue(any("An action film about heists." in text for text in descriptions))
+
+    def test_auto_match_can_include_channels_without_epg(self):
+        base_url = "http://127.0.0.1:5004"
+        channels = []
+        for index in range(1, 3):
+            channel = M3UChannel()
+            channel.name = "Channel %d" % index
+            channel.tvg_id = "ch%d" % index
+            channel.url = "%s/stream/%d.1" % (base_url, index)
+            channels.append(channel)
+        channels[1].tvg_id = "missing"
+        lineup, channel_map = build_lineup(channels, base_url=base_url)
+
+        matched_path = os.path.join(tempfile.mkdtemp(), "matched.mxf")
+        _, matched_count = write_wmc_auto_match_mxf(
+            lineup, channel_map, SAMPLE_XMLTV, output_path=matched_path
+        )
+        self.assertEqual(matched_count, 1)
+
+        all_path = os.path.join(tempfile.mkdtemp(), "all.mxf")
+        _, all_count = write_wmc_auto_match_mxf(
+            lineup,
+            channel_map,
+            SAMPLE_XMLTV,
+            output_path=all_path,
+            include_unmatched=True,
+        )
+        self.assertEqual(all_count, 2)
+        services = ET.parse(all_path).getroot().iter(MXF_NS + "Service")
+        self.assertEqual(len(list(services)), 2)
 
 
 class HttpServerTests(unittest.TestCase):
