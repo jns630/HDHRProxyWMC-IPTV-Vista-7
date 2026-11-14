@@ -169,7 +169,7 @@ jobs:
           set -euo pipefail
           if [ "${LEGACY}" = "true" ]; then
             python -m pip install --upgrade "pip<22" "setuptools<60" "wheel<0.38"
-            python -m pip install "nuitka==1.9.7" "zstandard==0.19.0" "ordered-set>=4.1.0"
+            python -m pip install "nuitka==1.9.7" "zstandard==0.19.0"
           else
             python -m pip install --upgrade pip
             python -m pip install "nuitka==4.3.5"
@@ -202,16 +202,16 @@ jobs:
           UAC_ADMIN: ${{ matrix.uac_admin }}
         run: |
           $ErrorActionPreference = "Stop"
-          $scriptArgs = @(
-            "-Mode", "onefile",
-            "-OutputDir", "nuitka-out/$env:LABEL",
-            "-OutputName", $env:BINARY
-          )
+          $scriptArgs = @{
+            Mode = "onefile"
+            OutputDir = "nuitka-out/$env:LABEL"
+            OutputName = $env:BINARY
+          }
           if ($env:COMPILER) {
-            $scriptArgs += @("-Compiler", $env:COMPILER)
+            $scriptArgs.Compiler = $env:COMPILER
           }
           if ($env:UAC_ADMIN -eq "true") {
-            $scriptArgs += "-UacAdmin"
+            $scriptArgs.UacAdmin = $true
           }
           & .\build_nuitka.ps1 @scriptArgs
 
