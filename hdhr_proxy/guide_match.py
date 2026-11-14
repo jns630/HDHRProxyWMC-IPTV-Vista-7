@@ -37,9 +37,16 @@ def write_wmc_auto_match_mxf(
     output_path: str = "HDHRProxyWMC_AutoMatch.generated.mxf",
     vista_mode: bool = False,
     epg123_mode: bool = False,
+    include_unmatched: bool = False,
 ) -> Tuple[str, int]:
     rows = build_guide_match_rows(lineup, channel_map, xmltv_xml)
-    filtered_lineup, filtered_channel_map = filter_lineup_to_matched_channels(lineup, channel_map, rows)
+    if include_unmatched:
+        # Keep every advertised channel in the guide lineup.  Unmatched
+        # channels simply have no programmes, but WMC/EPG123 still sees and
+        # maps them so they remain available for live TV.
+        filtered_lineup, filtered_channel_map = lineup, channel_map
+    else:
+        filtered_lineup, filtered_channel_map = filter_lineup_to_matched_channels(lineup, channel_map, rows)
     out_path = write_mxf(
         xmltv_xml,
         filtered_lineup,

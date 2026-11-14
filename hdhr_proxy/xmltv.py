@@ -170,7 +170,9 @@ def _normalize_channel_name(value: str) -> str:
     text = value.lower().strip()
     text = re.sub(r"\s*\([^)]*\)\s*$", "", text)
     text = text.replace("&", "and")
-    text = re.sub(r"[^a-z0-9]+", "", text)
+    # Keep Unicode letters/digits (including CJK) so Chinese channel names do
+    # not collapse into an empty string and collide with every other channel.
+    text = re.sub(r"[^\w]+", "", text, flags=re.UNICODE)
     return text
 
 

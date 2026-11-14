@@ -22,6 +22,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 
 from hdhr_proxy import __version__
@@ -40,6 +41,7 @@ from hdhr_proxy.guide_match import (
     write_wmc_auto_match_mxf,
 )
 from hdhr_proxy.mxf import (
+    latest_programme_end,
     write_mxf,
     import_mxf,
     import_and_map_mxf_with_epg123,
@@ -346,15 +348,24 @@ def write_hdhrproxy_mapping_file(lineup, path: str = "HDHRProxyIPTV_MappingList.
 
 def find_local_ip() -> str:
     import socket
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    # Prefer the interface that has a route to the public internet. This avoids
+    # picking virtual/VPN adapters (e.g. 198.18.x.x) on multi-homed hosts.
+    for target in (("8.8.8.8", 53), ("1.1.1.1", 53)):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.settimeout(0.5)
+            sock.connect(target)
+            ip = sock.getsockname()[0]
+            if ip and not ip.startswith("127."):
+                return ip
+        except Exception:
+            pass
+        finally:
+            sock.close()
     try:
-        sock.settimeout(0.5)
-        sock.connect(("10.255.255.255", 1))
-        return sock.getsockname()[0]
+        return socket.gethostbyname(socket.gethostname())
     except Exception:
         return "127.0.0.1"
-    finally:
-        sock.close()
 
 
 def resolve_listen_ip(cfg: Config) -> str:
@@ -424,6 +435,19 @@ def run_proxy(cfg: Config):
         dvb_start_frequency=cfg.dvb_start_frequency,
     )
     xmltv_data = load_xmltv(cfg.xmltv_file, cfg.xmltv_url, channel_map)
+    xmltv_is_fresh = True
+    if xmltv_data:
+        latest_end = latest_programme_end(xmltv_data.filtered_xml)
+        if latest_end and latest_end <= datetime.now(timezone.utc) - timedelta(minutes=1):
+            xmltv_is_fresh = False
+            logger.error(
+                "XMLTV guide is stale: its newest programme ended at %s UTC. "
+                "Refusing to import it so the existing WMC guide is not cleared. "
+                "Update the upstream EPG source and run the import again.",
+                latest_end.strftime("%Y-%m-%d %H:%M"),
+            )
+        elif latest_end:
+            logger.info("XMLTV guide is current through %s UTC.", latest_end.strftime("%Y-%m-%d %H:%M"))
     generated_mxf_path = None
     auto_match_mxf_path = None
     vista_guide_xml_path = None
@@ -445,7 +469,9 @@ def run_proxy(cfg: Config):
                 vista_mode=vista_mode,
             )
             generated_mxf_path = mxf_path
-            if cfg.import_mxf:
+            if cfg.import_mxf and not xmltv_is_fresh:
+                logger.warning("Skipping MXF import because the XMLTV guide is stale.")
+            elif cfg.import_mxf:
                 if vista_mode:
                     vista_guide_xml_path = write_vista_guide_xml(
                         xmltv_data.filtered_xml,
@@ -468,9 +494,12 @@ def run_proxy(cfg: Config):
                 output_path=cfg.auto_match_mxf_file,
                 vista_mode=vista_mode,
                 epg123_mode=use_epg123_map,
+                include_unmatched=bool(cfg.get("include_unmatched_channels", False)),
             )
-            logger.info("Wrote WMC auto-match MXF (%s matched channels): %s", auto_match_count, auto_match_mxf_path)
-            if cfg.import_auto_match_mxf:
+            logger.info("Wrote WMC auto-match MXF (%s channels): %s", auto_match_count, auto_match_mxf_path)
+            if cfg.import_auto_match_mxf and not xmltv_is_fresh:
+                logger.warning("Skipping auto-match MXF import because the XMLTV guide is stale.")
+            elif cfg.import_auto_match_mxf:
                 if use_epg123_map:
                     logger.info("Importing lineup-matched guide into the WMC internal database via EPG123 auto-match when available")
                     try:
@@ -554,6 +583,10 @@ def run_proxy(cfg: Config):
         output_codec=cfg.ffmpeg_output_codec,
         audio_codec=cfg.ffmpeg_audio_codec,
         bitrate=cfg.ffmpeg_bitrate,
+        hw_accel=cfg.get("ffmpeg_hw_accel", "auto"),
+        hw_decode=cfg.get("ffmpeg_hw_decode", "off"),
+        copy_video=cfg.get("ffmpeg_copy_video", "auto"),
+        ffprobe_path=cfg.get("ffprobe_path", "ffprobe"),
         force_vista_mode=bool(getattr(cfg, "force_vista_mode", False)),
         tuner_type=cfg.tuner_type,
         dvb_first_channel=cfg.dvb_first_channel,
@@ -644,6 +677,11 @@ Examples:
     parser.add_argument("--map-guide-wmc", action="store_true", help="Generate and import a lineup-matched guide directly into the WMC internal database")
     parser.add_argument("--guide-only-lineup", action="store_true", help="Only advertise channels that matched XMLTV/MXF guide data")
     parser.add_argument(
+        "--include-unmatched-channels",
+        action="store_true",
+        help="Include channels without XMLTV matches in the imported guide lineup (they show no guide data but stay in WMC)",
+    )
+    parser.add_argument(
         "--hls-base-url",
         help="Original web URL for a saved HLS master playlist that uses relative variant/segment URLs",
     )
@@ -673,6 +711,26 @@ Examples:
     parser.add_argument("--output-codec", default=None, help="ffmpeg output video codec (default: from config or mpeg2video)")
     parser.add_argument("--audio-codec", default=None, help="ffmpeg output audio codec (default: from config or ac3)")
     parser.add_argument("--bitrate", default=None, help="ffmpeg output bitrate (default: from config or 4000k)")
+    parser.add_argument(
+        "--hw-accel",
+        default=None,
+        help="Hardware H.264 encoder: auto, off, nvenc, qsv, amf (default: from config or auto)",
+    )
+    parser.add_argument(
+        "--hw-decode",
+        default=None,
+        help="Hardware decoding: auto or off (default: from config or off)",
+    )
+    parser.add_argument(
+        "--copy-video",
+        default=None,
+        help="Copy WMC-compatible H.264 source video: auto or off (default: from config or auto)",
+    )
+    parser.add_argument(
+        "--ffprobe",
+        default=None,
+        help="Path to ffprobe (default: from config or ffprobe beside ffmpeg)",
+    )
     parser.add_argument("--vista", action="store_true", help="Force Vista-specific WMC codec behavior for client testing")
     parser.add_argument("--vista-subchannels", type=int, help="Vista scan test mode: fixed subchannels per RF, for example 20")
 
@@ -725,6 +783,8 @@ Examples:
         cfg.import_auto_match_mxf = True
     if args.guide_only_lineup:
         cfg.guide_only_lineup = True
+    if args.include_unmatched_channels:
+        cfg.include_unmatched_channels = True
     if args.port is not None:
         cfg.http_port = args.port
     if args.listen_ip is not None:
@@ -758,6 +818,14 @@ Examples:
         cfg.ffmpeg_audio_codec = args.audio_codec
     if args.bitrate is not None:
         cfg.ffmpeg_bitrate = args.bitrate
+    if args.hw_accel is not None:
+        cfg.ffmpeg_hw_accel = args.hw_accel
+    if args.hw_decode is not None:
+        cfg.ffmpeg_hw_decode = args.hw_decode
+    if args.copy_video is not None:
+        cfg.ffmpeg_copy_video = args.copy_video
+    if args.ffprobe is not None:
+        cfg.ffprobe_path = args.ffprobe
     if args.vista:
         cfg.force_vista_mode = True
     if args.vista_subchannels is not None:

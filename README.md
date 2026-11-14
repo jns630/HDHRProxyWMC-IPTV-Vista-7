@@ -275,6 +275,11 @@ Values in `config.json` are used unless the matching command-line option is expl
 | `ffmpeg_output_codec` | Configured video codec. At runtime, WMC mode forces Vista to `mpeg2video` and Windows 7 or newer to `libx264` H.264/MPEG-4 AVC. | `mpeg2video` |
 | `ffmpeg_audio_codec` | Audio codec used by HTTP stream transcoding. | `ac3` |
 | `ffmpeg_bitrate` | Video bitrate passed to ffmpeg. | `4000k` |
+| `ffmpeg_hw_accel` | Hardware H.264 encoder: `auto`, `off`, `nvenc`, `qsv`, `amf`, `vaapi`, `videotoolbox`. Auto-detects the GPU and falls back to libx264. | `auto` |
+| `ffmpeg_hw_decode` | Hardware decoding: `auto` or `off`. Uses NVDEC, QSV, D3D11VA, VAAPI, or VideoToolbox. | `off` |
+| `ffmpeg_copy_video` | Probe the source with ffprobe and copy WMC-compatible H.264 video instead of re-encoding: `auto` or `off`. | `auto` |
+| `ffprobe_path` | Path or command name for ffprobe. Defaults to `ffprobe` beside ffmpeg. | `ffprobe` |
+| `include_unmatched_channels` | Include channels without XMLTV matches in the imported guide lineup. They show no guide data but remain available in WMC. | `false` |
 | `udp_bind_ip` | Reserved for UDP stream handling. | `0.0.0.0` |
 | `fallback_channel_duration` | Reserved fallback duration value. | `60` |
 | `channel_mapping` | Optional mapping from channel names to guide numbers. | `{}` |
@@ -409,6 +414,19 @@ For Vista, use the 32-bit Vista build and add `--vista`:
 ```
 
 On Windows 7 or newer, `--map-guide-wmc` uses EPG123 when it is installed because EPG123 knows how to activate and auto-map imported guide lineups against WMC's scanned tuner channels. Without EPG123 it falls back to `loadmxf.exe`. Vista TV Pack uses its installed `loadmxf.exe`; stock pre-TV-Pack Vista falls back to its native `ehepg` XML loader.
+
+### Keeping channels without EPG
+
+By default the auto-match MXF only contains channels that matched XMLTV. If
+your playlist has channels without guide data and you still want them in the
+WMC guide lineup, pass:
+
+```powershell
+python main.py --m3u-file "playlist.m3u" --xmltv-url "https://epg.pw/xmltv/epg_CN.xml" --map-guide-wmc --include-unmatched-channels
+```
+
+Those channels are imported with an empty schedule, so WMC shows "no guide
+data" for them but they remain selectable for live TV.
 
 ### Guide-only WMC scan mode
 
@@ -565,6 +583,72 @@ hdhr_wmc_<device_id>.reg
 ```
 
 Import that file from an elevated prompt or by using Registry Editor as Administrator.
+
+## Stream Copy (ffprobe)
+
+When `ffmpeg_copy_video` is `auto` (the default), the proxy runs ffprobe once
+per source (cached for two minutes) and checks:
+
+- video codec is H.264,
+- pixel format is 8-bit `yuv420p`/`yuvj420p`,
+- profile is Baseline/Main/High,
+- level is 4.2 or lower.
+
+If all checks pass, ffmpeg uses `-c:v copy` for video and only transcodes audio
+to AC-3. This removes the CPU cost of re-encoding live H.264 channels.
+
+Vista is never put on the copy path: its WMC profile requires MPEG-2, so the
+proxy keeps transcoding to `mpeg2video`. The same applies to HEVC, 10-bit,
+4:2:2 and 4:4:4 sources.
+
+```powershell
+# Auto copy compatible H.264 sources
+python main.py --config config.json --copy-video auto
+
+# Always re-encode video
+python main.py --config config.json --copy-video off
+
+# Explicit ffprobe path
+python main.py --config config.json --ffprobe "C:\Tools\ffmpeg\bin\ffprobe.exe"
+```
+
+## Hardware Acceleration
+
+The proxy can use GPU encoding/decoding instead of CPU-only `libx264`:
+
+| Platform | Encoder | Decoder |
+| --- | --- | --- |
+| Windows + NVIDIA | `h264_nvenc` | `-hwaccel cuda` |
+| Windows + Intel | `h264_qsv` | `-hwaccel qsv` |
+| Windows + AMD | `h264_amf` | `-hwaccel d3d11va` |
+| Linux + NVIDIA | `h264_nvenc` | `-hwaccel cuda` |
+| Linux + Intel/AMD | `h264_vaapi` | `-hwaccel vaapi` |
+| macOS | `h264_videotoolbox` | `-hwaccel videotoolbox` |
+
+Detection is automatic: the proxy enumerates GPUs, checks which encoders the
+installed ffmpeg was built with, and runs a one-frame test encode. If the test
+fails it falls back to `libx264` (or `mpeg2video` on Vista) so playback keeps
+working.
+
+```powershell
+# Automatic (default)
+python main.py --config config.json --hw-accel auto
+
+# Force software encoding
+python main.py --config config.json --hw-accel off
+
+# Force NVIDIA and enable NVDEC
+python main.py --config config.json --hw-accel nvenc --hw-decode auto
+
+# Linux VAAPI
+python main.py --config config.json --hw-accel vaapi --hw-decode auto
+
+# macOS VideoToolbox
+python main.py --config config.json --hw-accel videotoolbox --hw-decode auto
+```
+
+VAAPI uses the first `/dev/dri/renderD*` device. The Vista MPEG-2 profile is
+unaffected and always uses the software MPEG-2 encoder.
 
 ## ffmpeg Behavior
 
