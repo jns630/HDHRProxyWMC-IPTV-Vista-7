@@ -304,6 +304,8 @@ class HDHRRequestHandler(BaseHTTPRequestHandler):
                 output_codec=self.config.ffmpeg_output_codec,
                 audio_codec=self.config.ffmpeg_audio_codec,
                 bitrate=self.config.ffmpeg_bitrate,
+                hw_accel=self.config.get("ffmpeg_hw_accel", "auto"),
+                hw_decode=self.config.get("ffmpeg_hw_decode", "off"),
                 vista_mode=bool(getattr(self.config, "force_vista_mode", False)),
             )
 

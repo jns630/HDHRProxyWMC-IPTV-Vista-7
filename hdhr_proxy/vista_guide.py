@@ -11,6 +11,48 @@ from .xmltv import resolve_channel_xmltv_ids
 
 logger = logging.getLogger(__name__)
 
+VISTA_HELPER_NAME = "HDHRProxyWMC-VistaGuideImport.exe"
+
+
+def _vista_import_helper_candidates() -> List[str]:
+    """Return possible locations for the prebuilt Vista guide helper.
+
+    PyInstaller exposes its temp directory as ``sys._MEIPASS``.  Nuitka
+    standalone keeps data files beside the executable, while Nuitka onefile
+    extracts them beside ``__file__``.  Cover all three layouts and keep the
+    source-tree fallback for development runs.
+    """
+    candidates: List[str] = []
+
+    bundle_dir = getattr(sys, "_MEIPASS", None)
+    if bundle_dir:
+        candidates.append(os.path.join(bundle_dir, VISTA_HELPER_NAME))
+
+    compiled = globals().get("__compiled__")
+    if compiled is not None:
+        for attr in ("python_runtime_dir", "containing_dir"):
+            base = getattr(compiled, attr, None)
+            if base:
+                candidates.append(os.path.join(base, VISTA_HELPER_NAME))
+
+    # Nuitka onefile extracts included data files next to __file__.
+    candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), VISTA_HELPER_NAME))
+    candidates.append(os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), VISTA_HELPER_NAME))
+    candidates.append(
+        os.path.join(
+            os.path.dirname(os.path.dirname(__file__)),
+            "vista_helper",
+            "bin",
+            VISTA_HELPER_NAME,
+        )
+    )
+
+    unique: List[str] = []
+    for candidate in candidates:
+        if candidate and candidate not in unique:
+            unique.append(candidate)
+    return unique
+
 
 def write_vista_guide_xml(
     xmltv_xml: str,
@@ -131,15 +173,7 @@ def validate_vista_guide_xml(output_path: str) -> None:
 
 
 def _find_vista_import_helper() -> str:
-    candidates = []
-    bundle_dir = getattr(sys, "_MEIPASS", None)
-    if bundle_dir:
-        candidates.append(os.path.join(bundle_dir, "HDHRProxyWMC-VistaGuideImport.exe"))
-    candidates.extend([
-        os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "HDHRProxyWMC-VistaGuideImport.exe"),
-        os.path.join(os.path.dirname(os.path.dirname(__file__)), "vista_helper", "bin", "HDHRProxyWMC-VistaGuideImport.exe"),
-    ])
-    for candidate in candidates:
+    for candidate in _vista_import_helper_candidates():
         if os.path.exists(candidate):
             return candidate
     raise FileNotFoundError("Vista guide import helper was not packaged with the program.")

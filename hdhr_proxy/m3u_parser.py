@@ -386,7 +386,7 @@ def build_lineup(
         lineup.append({
             "GuideNumber": guide_number,
             "GuideName": ch.name,
-            "CallSign": scanned_call_sign,
+            "CallSign": ch.name,
             "ScannedCallSign": scanned_call_sign,
             "URL": url,
             "Modulation": plan.modulation,

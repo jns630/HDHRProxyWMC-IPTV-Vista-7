@@ -8,6 +8,7 @@ import threading
 import re
 from typing import Optional, Dict, List
 
+from .hardware import hw_decode_args, hw_encoder_args, select_hw_encoder
 from .m3u_parser import M3UParser
 
 logger = logging.getLogger(__name__)
@@ -219,7 +220,13 @@ def _should_keep_original_hls_url(source_url: str, playback_url: str) -> bool:
     return False
 
 
-def video_encoder_args(output_codec: str, bitrate: str, use_hls_profile: bool = False, vista_mode: bool = False):
+def video_encoder_args(
+    output_codec: str,
+    bitrate: str,
+    use_hls_profile: bool = False,
+    vista_mode: bool = False,
+    hw_encoder: Optional[str] = None,
+):
     codec = (output_codec or "mpeg2video").lower()
     frame_size = VISTA_FRAME_SIZE if vista_mode else "1280x720"
     bitrate_text = str(bitrate or "").strip().lower()
@@ -238,6 +245,8 @@ def video_encoder_args(output_codec: str, bitrate: str, use_hls_profile: bool = 
         "-aspect", "16:9",
     ]
     if codec in ("h264", "libx264", "mpeg4_h264", "mpeg4-avc", "avc"):
+        if hw_encoder:
+            return hw_encoder_args(hw_encoder, bitrate, frame_size, video_bufsize)
         return [
             "-c:v", "libx264",
             "-preset", "veryfast",
@@ -329,6 +338,8 @@ def ffmpeg_transcode_stream(
     bitrate: str = "4000k",
     output_format: str = "mpegts",
     vista_mode: bool = False,
+    hw_accel: str = "auto",
+    hw_decode: str = "off",
 ):
     source_url = _resolve_hls_source_url(source_url)
 
@@ -338,6 +349,7 @@ def ffmpeg_transcode_stream(
 
     use_hls_profile = _is_hls_like_source(source_url)
     video_copy = True
+    hw_encoder = None if video_copy or vista_mode else select_hw_encoder(ffmpeg_path, hw_accel)
     effective_bitrate = _vista_profile_bitrate(bitrate) if vista_mode else (
         _hls_profile_bitrate(bitrate) if use_hls_profile else bitrate
     )
@@ -367,6 +379,7 @@ def ffmpeg_transcode_stream(
         # key, and segment fetches so each ~6s segment boundary does not pay a
         # fresh TLS handshake (see _http_persistent_args).
         cmd.extend(_http_persistent_args(ffmpeg_path))
+    cmd.extend(hw_decode_args(hw_encoder, hw_decode))
     cmd.extend([
         "-i", source_url,
         "-map", "0:v:0?",
@@ -380,6 +393,7 @@ def ffmpeg_transcode_stream(
         effective_bitrate,
         use_hls_profile=use_hls_profile,
         vista_mode=vista_mode,
+        hw_encoder=hw_encoder,
     )
     cmd += video_args + [
         "-c:a", audio_codec,
@@ -463,6 +477,8 @@ class StreamSession:
         output_codec: str = "mpeg2video",
         audio_codec: str = "ac3",
         bitrate: str = "4000k",
+        hw_accel: str = "auto",
+        hw_decode: str = "off",
         vista_mode: bool = False,
     ):
         self.channel_id = channel_id
@@ -472,6 +488,8 @@ class StreamSession:
         self.output_codec = output_codec
         self.audio_codec = audio_codec
         self.bitrate = bitrate
+        self.hw_accel = hw_accel
+        self.hw_decode = hw_decode
         self.vista_mode = vista_mode
         self._generator = None
 
@@ -499,5 +517,7 @@ class StreamSession:
             output_codec=self.output_codec,
             audio_codec=self.audio_codec,
             bitrate=self.bitrate,
+            hw_accel=self.hw_accel,
+            hw_decode=self.hw_decode,
             vista_mode=self.vista_mode,
         )

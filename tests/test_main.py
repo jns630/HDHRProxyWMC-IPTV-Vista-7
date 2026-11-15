@@ -87,6 +87,23 @@ class MainConfigPrecedenceTests(unittest.TestCase):
         run_proxy.assert_not_called()
 
 
+class EpgImportPlatformTests(unittest.TestCase):
+    def test_windows_is_supported(self):
+        with mock.patch.object(main_module.platform, "system", return_value="Windows"):
+            self.assertTrue(main_module.wmc_epg_import_supported())
+
+    def test_non_windows_is_not_supported(self):
+        for name in ("Linux", "Darwin"):
+            with mock.patch.object(main_module.platform, "system", return_value=name):
+                self.assertFalse(main_module.wmc_epg_import_supported())
+
+    def test_non_windows_skips_wmc_import(self):
+        with mock.patch.object(main_module.platform, "system", return_value="Linux"), \
+                mock.patch.object(main_module, "import_mxf") as import_mxf:
+            self.assertFalse(main_module.import_mxf_for_current_wmc("guide.mxf"))
+            import_mxf.assert_not_called()
+
+
 class SafeLogRotationTests(unittest.TestCase):
     def test_locked_log_does_not_raise_during_rollover(self):
         with tempfile.TemporaryDirectory() as tmp:

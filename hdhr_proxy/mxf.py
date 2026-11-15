@@ -172,7 +172,15 @@ def write_mxf(
 
     output_path = os.path.abspath(output_path)
     tree = ET.ElementTree(root)
+    # Write UTF-8 with a BOM. EPG123's .NET XML reader relies on the BOM to
+    # detect UTF-8 for non-ASCII guide text, but its encoding name must stay
+    # "utf-8" (it does not recognise "utf-8-sig").
     tree.write(output_path, encoding="utf-8", xml_declaration=True)
+    with open(output_path, "rb") as f:
+        data = f.read()
+    if not data.startswith(b"\xef\xbb\xbf"):
+        with open(output_path, "wb") as f:
+            f.write(b"\xef\xbb\xbf" + data)
     if vista_mode:
         logger.info(
             "Wrote MXF while Vista mode is active. Vista TV Pack can import "
@@ -300,6 +308,8 @@ def _run_loadmxf_command(cmd: List[str]) -> None:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             universal_newlines=True,
+            encoding="utf-8",
+            errors="replace",
             cwd=os.path.dirname(cmd[0]) or None,
         )
         _log_loadmxf_output(result.stdout, result.stderr)
@@ -438,6 +448,22 @@ def _build_channel_metadata(
             "logo_image_url": _logo_proxy_url(item, logo_image, logo_url) if logo_image else "",
         }
     return meta_by_service
+
+
+def latest_programme_end(xmltv_xml: str) -> Optional[datetime]:
+    """Return the newest XMLTV programme stop time, or None if unavailable."""
+    if not xmltv_xml:
+        return None
+    try:
+        root = ET.fromstring(xmltv_xml)
+    except ET.ParseError:
+        return None
+    latest: Optional[datetime] = None
+    for programme in root.findall("programme"):
+        stop_dt = _parse_xmltv_datetime(programme.attrib.get("stop"))
+        if stop_dt and (latest is None or stop_dt > latest):
+            latest = stop_dt
+    return latest
 
 
 def _collect_programmes(xmltv_xml: str, channel_meta: Dict[str, Dict]) -> Dict[str, List[Dict]]:
@@ -851,7 +877,6 @@ def _program_mxf_attrs(program: Dict, vista_mode: bool) -> Dict[str, str]:
         "id": program["id"],
         "uid": program["uid"],
         "title": program["title"],
-        "language": "en",
     }
     if program.get("episode_title"):
         attrs["episodeTitle"] = program["episode_title"]
